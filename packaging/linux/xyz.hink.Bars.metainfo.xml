@@ -36,6 +36,14 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.8.0" date="2026-10-30">
+      <description>
+        <ul>
+          <li>Linux: Update now installs the new version in place, then asks whether to restart Bars. This works for the release tarball (if Bars can write to its folder) and for the release Flatpak (installed for your user); other copies still open the release page. Updating this way starts after this version, so install this one by hand.</li>
+          <li>Restarting into an update waits until you've finished dictating, and Bars says so if it can't restart itself.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.7.6" date="2026-10-27">
       <description>
         <ul>
@@ -43,7 +51,8 @@
           <li>Coding agents running in a herdr pane are found too.</li>
         </ul>
       </description>
-    </release>    <release version="0.7.5" date="2026-10-26">
+    </release>
+    <release version="0.7.5" date="2026-10-26">
       <description>
         <ul>
           <li>macOS 27: Bars no longer says it needs Device Control and Data Access when it already has it and works. Some Macs report the permission as off while it's on; Bars now also checks what it can actually do.</li>

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/bars-core", "crates/bars"]
 
 [workspace.package]
-version = "0.7.6"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 authors = ["Chris Hinkley <chris@hink.xyz>"]
