@@ -2,9 +2,9 @@
 
 # Bars
 
-Private, on-device voice dictation that works in every app. Hold a shortcut,
-speak, let go: the text appears wherever your cursor is. Nothing leaves your
-computer.
+Spit some bars! Hold a shortcut, speak, let go: your words appear wherever
+your cursor is, in any app. Bars is private, on-device voice dictation, so
+nothing leaves your computer.
 
 Bars is built in Rust with [GPUI](https://www.gpui.rs) (Zed's UI framework,
 via [GPUI Kit](https://gpui-kit.com)), runs NVIDIA's Parakeet speech models
