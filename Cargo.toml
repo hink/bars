@@ -23,5 +23,6 @@ opt-level = 2
 [patch.crates-io]
 gpui-pre-linux = { path = "third_party/gpui-pre-linux" }
 # Parakeet also reports how sure it was of each token, and its vocabulary,
-# for learning from corrections. See third_party/transcribe-rs-parakeet.patch.
+# for learning from corrections, and skips the frames each token covers (TDT
+# durations, as onnx-asr does). See third_party/transcribe-rs-parakeet.patch.
 transcribe-rs = { path = "third_party/transcribe-rs" }

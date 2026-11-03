@@ -436,4 +436,29 @@ mod tests {
         assert_eq!(words_within(&t, &(1.0..1.55)).0, "and watch");
         assert_eq!(words_within(&t, &(f32::NEG_INFINITY..f32::INFINITY)).0, "customers, and watch the");
     }
+
+    /// Needs Parakeet Ultra downloaded; speaks with macOS's `say`.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn parakeet_hears_a_repeated_word_as_often_as_it_was_said() {
+        let info = models::find("parakeet-ultra").unwrap();
+        let mut model = load(info, &info.dir(), None).expect("model downloaded");
+        let wav = std::env::temp_dir().join(format!("bars-repeat-{}.wav", std::process::id()));
+        for (said, times) in [("test test test", 3), ("test test test test test", 5)] {
+            let ok = std::process::Command::new("say")
+                .args(["-v", "Samantha", "--data-format=LEI16@16000", "-o"])
+                .arg(&wav)
+                .arg(said)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "say");
+            let samples = transcribe_rs::audio::read_wav_samples(&wav).unwrap();
+            let text = model.transcribe(&samples, &TranscribeOptions::default()).unwrap().text;
+            let heard = text.to_lowercase().matches("test").count();
+            assert_eq!(heard, times, "{said:?} came out as {text:?}");
+        }
+        let _ = std::fs::remove_file(&wav);
+    }
 }

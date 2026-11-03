@@ -374,6 +374,15 @@ impl ParakeetModel {
             } else {
                 vocab_logits_slice
             };
+            // TDT models follow the vocabulary with duration logits: how many
+            // frames the token (or blank) covers. Not skipping them makes the
+            // next frames emit the same token again ("test" said three times
+            // came out a dozen times).
+            let step = vocab_logits_slice[vocab_logits.len()..]
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map_or(0, |(idx, _)| idx);
 
             let token = vocab_logits
                 .iter()
@@ -393,7 +402,10 @@ impl ParakeetModel {
                 emitted_tokens += 1;
             }
 
-            if token == self.blank_idx || emitted_tokens == MAX_TOKENS_PER_STEP {
+            if step > 0 {
+                t += step;
+                emitted_tokens = 0;
+            } else if token == self.blank_idx || emitted_tokens == MAX_TOKENS_PER_STEP {
                 t += 1;
                 emitted_tokens = 0;
             }
