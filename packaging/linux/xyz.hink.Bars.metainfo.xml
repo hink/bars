@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.8.2" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Parakeet no longer repeats words: "test test test" came out as a dozen tests with Parakeet Ultra. Parakeet models also transcribe faster.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.1" date="2026-11-03">
       <description>
         <ul>
