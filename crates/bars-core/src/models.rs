@@ -13,7 +13,7 @@ use anyhow::{Context as _, bail};
 
 use crate::paths;
 
-pub const DEFAULT_MODEL: &str = "parakeet-tdt-0.6b-v3";
+pub const DEFAULT_MODEL: &str = "parakeet-ultra";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -86,10 +86,44 @@ macro_rules! hf {
 }
 
 pub static CATALOG: &[ModelInfo] = &[
+    // Moondream's further-trained Parakeet v3: the same model and tokenizer,
+    // new weights. Pinned to a revision, so the sizes stay right.
+    ModelInfo {
+        id: "parakeet-ultra",
+        name: "Parakeet Ultra",
+        tagline: "Best accuracy, ~40x real-time on a modern CPU.",
+        family: Family::Parakeet,
+        languages: "25 European languages · auto-detect",
+        multilingual: true,
+        accuracy: 5,
+        speed: 4,
+        files: &[
+            ModelFile {
+                url: hf!("Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx" @ "b27f93c2238aa35e138996c005a62f1e8430f801", "int8/encoder-model.int8.onnx"),
+                name: "encoder-model.int8.onnx",
+                size: 649_431_593,
+            },
+            ModelFile {
+                url: hf!("Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx" @ "b27f93c2238aa35e138996c005a62f1e8430f801", "int8/decoder_joint-model.int8.onnx"),
+                name: "decoder_joint-model.int8.onnx",
+                size: 18_203_490,
+            },
+            ModelFile {
+                url: hf!("Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx" @ "b27f93c2238aa35e138996c005a62f1e8430f801", "nemo128.onnx"),
+                name: "nemo128.onnx",
+                size: 139_764,
+            },
+            ModelFile {
+                url: hf!("Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx" @ "b27f93c2238aa35e138996c005a62f1e8430f801", "vocab.txt"),
+                name: "vocab.txt",
+                size: 93_939,
+            },
+        ],
+    },
     ModelInfo {
         id: "parakeet-tdt-0.6b-v3",
         name: "Parakeet v3",
-        tagline: "Best accuracy, ~40x real-time on a modern CPU.",
+        tagline: "NVIDIA's original, which Ultra is trained from.",
         family: Family::Parakeet,
         languages: "25 European languages · auto-detect",
         multilingual: true,

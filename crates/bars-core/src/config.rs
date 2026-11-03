@@ -21,6 +21,9 @@ pub struct Config {
     /// The output polish model was offered: in setup, or once to people
     /// who had Bars before it.
     pub polish_offered: bool,
+    /// Recommended speech models already suggested to people using another
+    /// one: each is suggested once.
+    pub models_offered: Vec<String>,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             onboarded: false,
             polish_offered: false,
+            models_offered: Vec::new(),
         }
     }
 }

@@ -96,12 +96,19 @@ All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
 
 | Model | Download | Languages | Ryzen 9950X3D | 2 cores |
 | --- | --- | --- | --- | --- |
-| **Parakeet TDT 0.6B v3** (default) | 671 MB | 25 European, auto-detect | 245 ms | 513 ms |
-| Parakeet TDT 0.6B v2 | 661 MB | English | ≈ v3 | ≈ v3 |
+| **Parakeet Ultra** (default) | 668 MB | 25 European, auto-detect | ≈ v3 | ≈ v3 |
+| Parakeet TDT 0.6B v3 | 671 MB | 25 European, auto-detect | 245 ms | 513 ms || Parakeet TDT 0.6B v2 | 661 MB | English | ≈ v3 | ≈ v3 |
 | Canary 180M Flash | 213 MB | en, de, es, fr | 275 ms | 582 ms |
 
 Models download from Hugging Face on first run into
 `~/.local/share/bars/models` (Flatpak: `~/.var/app/xyz.hink.Bars/data`).
+
+[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra) is
+Moondream's further-trained Parakeet v3 (CC-BY-4.0, as ONNX by
+[Olicorne](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx)):
+the same model with better weights. On an M4 Pro it made fewer mistakes than
+v3 and ran 20–45% faster. People already using another model are offered it
+once, in the sidebar.
 
 Long dictations are transcribed while you talk. Once one is 12 seconds
 long, Bars cuts it in the next pause (without one, at the quietest moment

@@ -12,12 +12,13 @@ use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::{TITLE_BAR_HEIGHT, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use bars_core::controller::Phase;
+use bars_core::controller::{Command, Phase};
 use bars_core::engine::EngineStatus;
+use bars_core::models::ModelInfo;
 
 use crate::state::{AppState, UpdateStatus};
 use crate::theme::{FONT, PaletteExt};
-use crate::widgets::{ButtonKind, button, h_row, icon, v_col};
+use crate::widgets::{ButtonKind, button, fmt_bytes, h_row, icon, progress_bar, v_col};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -133,6 +134,7 @@ impl SettingsView {
         let needs_setup = !st.setup_complete();
         let status = status_line(st);
         let update = st.update.offered().map(|r| (r.clone(), st.update.clone()));
+        let offer = st.model_offer();
         let pages = [Page::Home, Page::General, Page::Model, Page::Dictionary, Page::History];
         let item = |page: Page, attention: bool, cx: &mut Context<Self>| {
             let active = self.page == page;
@@ -179,6 +181,7 @@ impl SettingsView {
                     .children(pages.into_iter().map(|page| item(page, false, cx).into_any_element())),
             )
             .child(div().flex_1())
+            .when_some(offer, |el, m| el.child(self.model_banner(m, cx)))
             .when_some(update, |el, (release, status)| el.child(self.update_banner(release, status, cx)))
             .child(item(Page::Setup, needs_setup, cx))
             .child(
@@ -192,7 +195,7 @@ impl SettingsView {
                         Status::Warn => p.warning,
                         Status::Live => p.recording,
                     }))
-                    .child(div().flex_1().text_size(px(12.)).text_color(p.text_muted).child(status.0))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(p.text_muted).child(status.0))
                     .child(
                         div()
                             .text_size(px(11.5))
@@ -249,6 +252,70 @@ impl SettingsView {
                         ))
                     }),
             )
+    }
+}
+
+impl SettingsView {
+    /// Above Setup, once, for someone using another model when Bars
+    /// recommends a new one: what it is, and a button to switch to it
+    /// (after its download).
+    fn model_banner(&self, m: &'static ModelInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = cx.palette();
+        let st = self.state.read(cx);
+        let switching = st.model_switch.is_some();
+        let progress = st.downloads.get(m.id).copied();
+        let failed = switching && st.download_errors.contains_key(m.id);
+        let current = st.active_model().map_or("your model", |c| c.name);
+        let detail = match progress {
+            Some((done, total)) => format!("Downloading… {}%", if total > 0 { done * 100 / total } else { 0 }),
+            None if failed => "The download failed.".to_string(),
+            None if switching => "Waiting to download…".to_string(),
+            None if st.installed.contains(m.id) => format!("Fewer mistakes than {current}, and it's already downloaded."),
+            None => format!("Fewer mistakes than {current}. Switching downloads {}.", fmt_bytes(m.size_bytes())),
+        };
+        let state = self.state.clone();
+        let answer = move |switch: bool| {
+            let state = state.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| state.update(cx, |s, cx| s.answer_model_offer(switch, cx))
+        };
+        let buttons = match (switching, failed) {
+            (true, false) => {
+                let state = self.state.clone();
+                let id = m.id.to_string();
+                h_row().child(button("model-offer-cancel", "Cancel", ButtonKind::Ghost, p).h(px(26.)).on_click(
+                    move |_, _, cx| state.read(cx).send(Command::CancelDownload(id.clone())),
+                ))
+            }
+            _ => h_row()
+                .gap(px(6.))
+                .child(button("model-offer-no", "Not now", ButtonKind::Ghost, p).h(px(26.)).on_click(answer(false)))
+                .child(
+                    button("model-offer-yes", if failed { "Try again" } else { "Switch" }, ButtonKind::Primary, p)
+                        .h(px(26.))
+                        .on_click(answer(true)),
+                ),
+        };
+        v_col()
+            .mb(px(8.))
+            .px(px(12.))
+            .py(px(10.))
+            .gap(px(8.))
+            .rounded(px(10.))
+            .bg(p.accent_soft)
+            .child(
+                h_row()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.text)
+                    .child(icon(I::Sparkles, p.accent_text, 15.))
+                    .child(format!("New: {}", m.name)),
+            )
+            .child(div().text_size(px(12.)).line_height(px(17.)).text_color(p.text_muted).child(detail))
+            .when_some(progress, |el, (done, total)| {
+                el.child(progress_bar(if total > 0 { done as f32 / total as f32 } else { 0.0 }, p))
+            })
+            .child(buttons.justify_end())
     }
 }
 

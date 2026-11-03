@@ -200,8 +200,10 @@ impl Onboarding {
         self.state.update(cx, |s, cx| {
             s.edit_config(cx, |c| {
                 c.onboarded = true;
-                // The model step offered output polish.
+                // The model step offered output polish, and the
+                // recommended model.
                 c.polish_offered = true;
+                c.models_offered.push(bars_core::models::DEFAULT_MODEL.to_string());
             })
         });
         self.state.read(cx).send(Command::MicTest(false));

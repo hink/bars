@@ -120,6 +120,9 @@ pub struct AppState {
     pub transcripts: u64,
     pub level: Entity<LevelMeter>,
     pub update: UpdateStatus,
+    /// The recommended model being downloaded to switch to (see
+    /// `model_offer`).
+    pub model_switch: Option<String>,
     /// The newest version already announced, so a daily check doesn't
     /// announce it again.
     update_announced: Option<String>,
@@ -172,6 +175,7 @@ impl AppState {
                 updated: Instant::now(),
             }),
             update: UpdateStatus::Unknown,
+            model_switch: None,
             update_announced: None,
             update_checked: None,
             update_tried: None,
@@ -399,12 +403,21 @@ impl AppState {
             }
             Event::DownloadFinished { id, error } => {
                 self.downloads.remove(&id);
+                self.installed = models::installed().into_iter().collect();
+                if self.model_switch.as_deref() == Some(id.as_str()) {
+                    if self.installed.contains(id.as_str()) {
+                        self.model_switch = None;
+                        let id = id.clone();
+                        self.edit_config(cx, |c| c.model.id = id);
+                    } else if error.as_deref().is_some_and(|e| e.contains("cancelled")) {
+                        self.model_switch = None;
+                    }
+                }
                 if let Some(e) = error {
                     if !e.contains("cancelled") {
                         self.download_errors.insert(id, e);
                     }
                 }
-                self.installed = models::installed().into_iter().collect();
             }
             Event::Captured(chord) => self.on_captured(chord, cx),
             Event::Transcript(text) => {
@@ -463,6 +476,38 @@ impl AppState {
 
     pub fn active_model(&self) -> Option<&'static models::ModelInfo> {
         models::find(&self.config.model.id)
+    }
+
+    /// The recommended speech model, for someone who uses another one and
+    /// hasn't been offered it yet (see `answer_model_offer`); also while it
+    /// downloads to switch to it.
+    pub fn model_offer(&self) -> Option<&'static models::ModelInfo> {
+        let m = models::find(models::DEFAULT_MODEL)?;
+        let switching = self.model_switch.as_deref() == Some(m.id);
+        let new = self.config.onboarded
+            && self.config.model.id != m.id
+            && !self.config.models_offered.iter().any(|id| id == m.id);
+        (switching || new).then_some(m)
+    }
+
+    /// Switches to the recommended model (once it's downloaded) or not;
+    /// either way it isn't offered again.
+    pub fn answer_model_offer(&mut self, switch: bool, cx: &mut Context<Self>) {
+        let id = models::DEFAULT_MODEL;
+        let installed = self.installed.contains(id);
+        self.edit_config(cx, |c| {
+            if !c.models_offered.iter().any(|o| o == id) {
+                c.models_offered.push(id.to_string());
+            }
+            if switch && installed {
+                c.model.id = id.to_string();
+            }
+        });
+        self.model_switch = (switch && !installed).then(|| id.to_string());
+        if self.model_switch.is_some() {
+            self.download_errors.remove(id);
+            self.send(Command::DownloadModel(id.to_string()));
+        }
     }
 
     /// Everything needed before the first dictation works.
