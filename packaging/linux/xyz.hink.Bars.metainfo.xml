@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.8.1" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Parakeet Ultra is the new default speech model: Moondream's further-trained Parakeet v3, with fewer mistakes and faster transcription. If you use another model, Bars offers it once in the sidebar; Switch downloads it (668 MB) and switches to it, Not now keeps your model.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-10-30">
       <description>
         <ul>
