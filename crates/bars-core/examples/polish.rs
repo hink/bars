@@ -1,9 +1,11 @@
-//! Polishes dictations with Spokenly Cleanup 1 and times it, downloading
-//! the model if needed. One dictation per line, from the arguments or
-//! stdin; `before|text|after` gives the text around the cursor, which with
-//! `--ahead` is read ahead (untimed), as Bars does while you talk.
+//! Polishes dictations with the default polish model (or `--model ID`,
+//! another one) and times it, downloading the model if needed. One
+//! dictation per line, from the arguments or stdin; `before|text|after`
+//! gives the text around the cursor, which with `--ahead` is read ahead
+//! (untimed), as Bars does while you talk.
 //! usage: cargo run --release -p bars-core --example polish -- "um so i think we should uh ship it"
 //!        cargo run --release -p bars-core --example polish -- --ahead < testdata/polish.txt
+//!        cargo run --release -p bars-core --example polish -- --model spokenly-cleanup-1 --ahead < testdata/polish.txt
 
 use std::io::BufRead;
 use std::sync::Arc;
@@ -14,17 +16,26 @@ use bars_core::text::Surroundings;
 use bars_core::{models, polish};
 
 fn main() -> anyhow::Result<()> {
-    let info = &models::POLISH;
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let info = match args.iter().position(|a| a == "--model") {
+        Some(i) => {
+            let id = args.get(i + 1).cloned().unwrap_or_default();
+            args.drain(i..(i + 2).min(args.len()));
+            let m = models::polish_model(&id);
+            anyhow::ensure!(m.id == id, "no polish model {id:?}");
+            m
+        }
+        None => models::polish_model(models::DEFAULT_POLISH),
+    };
     if !info.is_installed() {
         eprintln!("downloading {} ...", info.name);
         models::download(info, Arc::new(AtomicBool::new(false)), &mut |_, _| {})?;
     }
     let t0 = Instant::now();
-    let mut model = polish::Model::load(&info.dir().join(polish::MODEL_FILE))?;
+    let mut model = polish::Model::load(&polish::model_path(info), polish::Format::of(info))?;
     let _ = model.rewrite("Hello there.", None, None)?;
-    eprintln!("loaded in {} ms", t0.elapsed().as_millis());
+    eprintln!("loaded {} in {} ms", info.name, t0.elapsed().as_millis());
 
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let ahead = args.first().is_some_and(|a| a == "--ahead");
     if ahead {
         args.remove(0);

@@ -14,6 +14,8 @@ use anyhow::{Context as _, bail};
 use crate::paths;
 
 pub const DEFAULT_MODEL: &str = "parakeet-ultra";
+/// The polish model new installs start on.
+pub const DEFAULT_POLISH: &str = "muesli-0.8b-v12";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -218,10 +220,10 @@ pub static CATALOG: &[ModelInfo] = &[
     },
 ];
 
-/// Spokenly Cleanup 1 by Spokenly, which polishes English dictations (see
-/// `polish`). Its license and notice come with it, as the Apache License
-/// asks. Pinned to a revision, so the sizes stay right.
-pub static POLISH: ModelInfo = ModelInfo {
+/// Spokenly Cleanup 1 by Spokenly, the first polish model (see `polish`),
+/// still offered. Its license and notice come with it, as the Apache
+/// License asks. Pinned to a revision, so the sizes stay right.
+pub static SPOKENLY: ModelInfo = ModelInfo {
     id: "spokenly-cleanup-1",
     name: "Spokenly Cleanup 1",
     tagline: "Removes fillers and false starts, applies spoken corrections, writes numbers as digits.",
@@ -233,7 +235,7 @@ pub static POLISH: ModelInfo = ModelInfo {
     files: &[
         ModelFile {
             url: hf!("spokenly/cleanup-1-gguf" @ "79936c95e5c0ea9162ae7a435e64cb3127020e36", "cleanup-1-q8_0.gguf"),
-            name: crate::polish::MODEL_FILE,
+            name: "cleanup-1-q8_0.gguf",
             size: 639_442_784,
         },
         ModelFile {
@@ -249,14 +251,47 @@ pub static POLISH: ModelInfo = ModelInfo {
     ],
 };
 
+/// Muesli 0.8B (v12) by Muesli, the default polish model (see `polish`): a
+/// fine-tune of Qwen3.5-0.8B, Apache-2.0. Pinned to a revision, so the
+/// size stays right.
+pub static MUESLI: ModelInfo = ModelInfo {
+    id: "muesli-0.8b-v12",
+    name: "Muesli 0.8B",
+    tagline: "Removes fillers and false starts, applies spoken corrections, keeps your wording.",
+    family: Family::Polish,
+    languages: "English",
+    multilingual: false,
+    accuracy: 5,
+    speed: 3,
+    files: &[ModelFile {
+        url: hf!("Muesli-HQ/qwen35-0.8b-muesli-cleanup-v12-gguf" @ "0e6b7446a64b170881bfe1af4b3ba892d18ecf3a", "qwen35-0.8b-muesli-v12-Q4_K_M.gguf"),
+        name: "qwen35-0.8b-muesli-v12-Q4_K_M.gguf",
+        size: 529_296_832,
+    }],
+};
+
+/// The polish models to choose from, the default first. Each one's first
+/// file is the model.
+pub static POLISH_MODELS: [&ModelInfo; 2] = [&MUESLI, &SPOKENLY];
+
+/// The polish model with this id, or the default.
+pub fn polish_model(id: &str) -> &'static ModelInfo {
+    POLISH_MODELS.iter().copied().find(|m| m.id == id).unwrap_or(POLISH_MODELS[0])
+}
+
+/// Who made a polish model, as its name is credited ("… by Spokenly").
+pub fn polish_maker(m: &ModelInfo) -> &'static str {
+    if m.id == MUESLI.id { "Muesli" } else { "Spokenly" }
+}
+
 /// A speech model by id.
 pub fn find(id: &str) -> Option<&'static ModelInfo> {
     CATALOG.iter().find(|m| m.id == id)
 }
 
-/// Every model Bars downloads: the speech models and the polish model.
+/// Every model Bars downloads: the speech models and the polish models.
 pub fn all() -> impl Iterator<Item = &'static ModelInfo> {
-    CATALOG.iter().chain(std::iter::once(&POLISH))
+    CATALOG.iter().chain(POLISH_MODELS.iter().copied())
 }
 
 /// Any downloadable model by id.
@@ -360,7 +395,12 @@ mod tests {
     #[test]
     fn catalog_is_consistent() {
         assert!(find(DEFAULT_MODEL).is_some());
-        assert!(find(POLISH.id).is_none() && find_any(POLISH.id).is_some());
+        for m in POLISH_MODELS {
+            assert!(find(m.id).is_none() && find_any(m.id).is_some() && polish_model(m.id).id == m.id);
+            assert!(m.files[0].name.ends_with(".gguf"), "{}", m.id);
+        }
+        assert_eq!(POLISH_MODELS[0].id, DEFAULT_POLISH);
+        assert_eq!(polish_model("gone").id, DEFAULT_POLISH);
         for m in all() {
             assert!(m.files.iter().all(|f| f.url.starts_with(HF) && f.size > 0), "{}", m.id);
         }

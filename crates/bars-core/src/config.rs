@@ -21,8 +21,8 @@ pub struct Config {
     /// The output polish model was offered: in setup, or once to people
     /// who had Bars before it.
     pub polish_offered: bool,
-    /// Recommended speech models already suggested to people using another
-    /// one: each is suggested once.
+    /// Recommended models (speech or polish) already suggested to people
+    /// using another one: each is suggested once.
     pub models_offered: Vec<String>,
 }
 
@@ -276,8 +276,12 @@ pub struct TextConfig {
     /// (Parakeet models only).
     pub learn: bool,
     /// Polish English dictations with a small local model (see `polish`):
-    /// false starts and spoken corrections resolved, numbers as digits.
+    /// false starts and spoken corrections resolved.
     pub polish: bool,
+    /// The polish model's id (see `models::POLISH_MODELS`). Empty in a
+    /// config from before there was a choice (see `settle_polish_model`).
+    #[serde(default)]
+    pub polish_model: String,
     pub suggestions: Vec<Suggestion>,
     /// Corrections undone or dismissed: never suggested again.
     pub ignored: Vec<Replacement>,
@@ -292,6 +296,7 @@ impl Default for TextConfig {
             snippets: Vec::new(),
             learn: true,
             polish: true,
+            polish_model: crate::models::DEFAULT_POLISH.to_string(),
             suggestions: Vec::new(),
             ignored: Vec::new(),
         }
@@ -344,8 +349,11 @@ impl Default for UiConfig {
 impl Config {
     pub fn load_or_default(path: &Path) -> Config {
         match std::fs::read_to_string(path) {
-            Ok(s) => match toml::from_str(&s) {
-                Ok(cfg) => cfg,
+            Ok(s) => match toml::from_str::<Config>(&s) {
+                Ok(mut cfg) => {
+                    cfg.settle_polish_model(crate::models::SPOKENLY.is_installed());
+                    cfg
+                }
                 Err(e) => {
                     log::error!("config at {} is invalid ({e}); using defaults", path.display());
                     let _ = std::fs::rename(path, path.with_extension("toml.bad"));
@@ -353,6 +361,16 @@ impl Config {
                 }
             },
             Err(_) => Config::default(),
+        }
+    }
+
+    /// A config from before there was a choice of polish model names none.
+    /// It keeps Spokenly Cleanup 1 where that's downloaded (the default is
+    /// offered once instead), and starts on the default otherwise.
+    fn settle_polish_model(&mut self, spokenly_installed: bool) {
+        if self.text.polish_model.is_empty() {
+            let id = if spokenly_installed { crate::models::SPOKENLY.id } else { crate::models::DEFAULT_POLISH };
+            self.text.polish_model = id.to_string();
         }
     }
 
@@ -382,6 +400,24 @@ mod tests {
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back, cfg);
         assert!(s.contains(&format!("chords = [\"{}\"]", Chord::default())));
+    }
+
+    #[test]
+    fn older_configs_keep_spokenly_if_they_have_it() {
+        use crate::models::{DEFAULT_POLISH, SPOKENLY};
+        assert_eq!(Config::default().text.polish_model, DEFAULT_POLISH);
+        // Written before there was a choice: no polish model.
+        let old = "[text]\npolish = true\n";
+        for (installed, expected) in [(true, SPOKENLY.id), (false, DEFAULT_POLISH)] {
+            let mut cfg: Config = toml::from_str(old).unwrap();
+            assert_eq!(cfg.text.polish_model, "");
+            cfg.settle_polish_model(installed);
+            assert_eq!(cfg.text.polish_model, expected);
+        }
+        // A choice made stays.
+        let mut cfg: Config = toml::from_str("[text]\npolish_model = \"spokenly-cleanup-1\"\n").unwrap();
+        cfg.settle_polish_model(false);
+        assert_eq!(cfg.text.polish_model, SPOKENLY.id);
     }
 
     #[test]

@@ -9,7 +9,7 @@ nothing leaves your computer.
 Bars is built in Rust with [GPUI](https://www.gpui.rs) (Zed's UI framework,
 via [GPUI Kit](https://gpui-kit.com)), runs NVIDIA's Parakeet speech models
 on the CPU with ONNX Runtime, and polishes English dictations with
-Spokenly Cleanup 1 on llama.cpp.
+Muesli 0.8B on llama.cpp.
 
 ## Using it
 
@@ -64,11 +64,13 @@ the model was unsure of that look or sound like what it wrote, never
 rewordings or everyday words; less clear ones wait under Suggestions on the
 Dictionary page until they're seen again. Only the word pairs are kept.
 
-English dictations are polished by a second small model, Spokenly Cleanup 1
-by Spokenly: filler words, repeats and false starts go, spoken corrections
-are applied ("send it to John, no wait, to Maria"), and numbers, email
-addresses and web addresses are written as you'd type them. It also sees
-the app's name and the text around the cursor, to continue a sentence.
+English dictations are polished by a second small model, Muesli 0.8B by
+Muesli (or Spokenly Cleanup 1 by Spokenly, picked on the Models page):
+filler words, repeats and false starts go, and spoken corrections are
+applied ("send it to John, no wait, to Maria"). Spokenly also writes
+numbers, email addresses and web addresses as you'd type them. The model
+also sees the app's name and the text around the cursor, to continue a
+sentence.
 Questions and instructions stay as you said them, so dictating to a coding
 agent is safe, and Bars checks every result: one that adds words or line
 breaks of its own, loses most of what you said or takes too long is
@@ -120,20 +122,38 @@ only the last piece is left: on an M4 Pro, 48 seconds of speech goes in
 0.3 s after you stop instead of 1.2 s. The text still goes into the app in
 one go, and shorter dictations are never cut.
 
-### Polish model
+### Polish models
+
+Both run on the CPU with llama.cpp. On 56 test dictations (restarts,
+fillers, sentences that must stay as they are, and questions and
+instructions that must not be answered), measured on a Ryzen 9950X3D:
+
+| Model | Download | Exactly right | Commands changed | Typical | Longest | Typical, 2 cores |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Muesli 0.8B** (default) | 529 MB | 54/56 | 0/13 | 194 ms | 1.1 s | 295 ms |
+| Spokenly Cleanup 1 | 639 MB | 48/56 | 0/13 | 87 ms | 0.45 s | 212 ms |
+
+[Muesli 0.8B](https://huggingface.co/Muesli-HQ/qwen35-0.8b-muesli-cleanup-v12-gguf)
+by Muesli (v12, a fine-tune of Qwen3.5-0.8B, Apache-2.0) catches more spoken
+corrections and false starts; it keeps numbers as said. Its instructions,
+the app's name and the text around the cursor are read into it while
+you're still talking, so only the dictation is left when you stop. People
+already polishing with Spokenly are offered it once, in the sidebar, and a
+settings file from before there was a choice keeps Spokenly where it's
+downloaded.
 
 [Spokenly Cleanup 1](https://huggingface.co/spokenly/cleanup-1) by Spokenly
 (a fine-tune of Qwen3-0.6B, Apache-2.0; its license and notice download
-with it) is 639 MB as 8-bit GGUF and runs on the CPU with llama.cpp. On an
-M4 Pro a typical dictation takes about 45 ms and a 90-word email about
-190 ms, two to two and a half times that on two cores. Most of a clean-up
-copies the dictation, so Bars guesses the next tokens from it and has the
-model check them all in one pass, which halves the time without changing
-the result. The app's name and the text around the cursor are read into
-the model while you're still talking, which saves about 20 ms when there's
-text before the cursor, again without changing the result. Metal isn't used: it isn't faster for a model this small, and
-it compiles its shaders for 15 seconds the first time each new version
-starts. On x86-64 polish needs AVX2 (Intel since 2013, AMD since 2015).
+with it) is 8-bit GGUF. On an M4 Pro a typical dictation takes about 45 ms
+and a 90-word email about 190 ms. Most of a clean-up copies the dictation,
+so Bars guesses the next tokens from it and has the model check them all
+in one pass, which halves the time without changing the result. Muesli's
+recurrent layers can't take back a wrong guess, so it goes one token at a
+time. For either model, reading ahead doesn't change the result.
+
+Metal isn't used: it isn't faster for a model this small, and it compiles
+its shaders for 15 seconds the first time each new version starts. On
+x86-64 polish needs AVX2 (Intel since 2013, AMD since 2015).
 Dictations that look like another language are left alone.
 Adding a model is a catalog entry in `crates/bars-core/src/models.rs`; any
 engine supported by [transcribe-rs](https://github.com/cjpais/transcribe-rs)
@@ -258,7 +278,7 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/segment.rs      cutting long dictations at pauses while you talk (tested)
   src/text.rs         filler removal, dictionary, snippets, voice commands
   src/learn.rs        learning dictionary words from corrections (tested)
-  src/polish.rs       polish: Spokenly Cleanup 1 on llama.cpp, and the checks
+  src/polish.rs       polish: Muesli or Spokenly Cleanup 1 on llama.cpp, and the checks
                       on what it returns (tested)
   src/update.rs       update checks (GitHub Releases), installs on request
   src/platform/       OS backends: linux/ (evdev, uinput, portals, data-control

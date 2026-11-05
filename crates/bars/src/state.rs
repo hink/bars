@@ -22,6 +22,42 @@ pub struct LevelMeter {
     pub updated: Instant,
 }
 
+/// A recommended model offered once, in the sidebar, to someone using
+/// another one (see `AppState::offer`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Offer {
+    /// The recommended speech model.
+    Speech,
+    /// The default polish model.
+    Polish,
+}
+
+impl Offer {
+    pub fn model(self) -> &'static models::ModelInfo {
+        match self {
+            Offer::Speech => models::find(models::DEFAULT_MODEL).expect("the default speech model is in the catalog"),
+            Offer::Polish => models::polish_model(models::DEFAULT_POLISH),
+        }
+    }
+
+    /// The model of this kind in use (or picked) now.
+    pub fn current(self, c: &Config) -> &str {
+        match self {
+            Offer::Speech => &c.model.id,
+            Offer::Polish => models::polish_model(&c.text.polish_model).id,
+        }
+    }
+
+    /// Makes the recommended model the one of its kind in use.
+    fn pick(self, c: &mut Config) {
+        let id = self.model().id.to_string();
+        match self {
+            Offer::Speech => c.model.id = id,
+            Offer::Polish => c.text.polish_model = id,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub kind: NoticeKind,
@@ -120,9 +156,9 @@ pub struct AppState {
     pub transcripts: u64,
     pub level: Entity<LevelMeter>,
     pub update: UpdateStatus,
-    /// The recommended model being downloaded to switch to (see
-    /// `model_offer`).
-    pub model_switch: Option<String>,
+    /// Offers answered with Switch whose model is still downloading (see
+    /// `offer`).
+    pub switching: HashSet<Offer>,
     /// The newest version already announced, so a daily check doesn't
     /// announce it again.
     update_announced: Option<String>,
@@ -175,7 +211,7 @@ impl AppState {
                 updated: Instant::now(),
             }),
             update: UpdateStatus::Unknown,
-            model_switch: None,
+            switching: HashSet::new(),
             update_announced: None,
             update_checked: None,
             update_tried: None,
@@ -404,13 +440,15 @@ impl AppState {
             Event::DownloadFinished { id, error } => {
                 self.downloads.remove(&id);
                 self.installed = models::installed().into_iter().collect();
-                if self.model_switch.as_deref() == Some(id.as_str()) {
+                for offer in [Offer::Speech, Offer::Polish] {
+                    if !self.switching.contains(&offer) || offer.model().id != id {
+                        continue;
+                    }
                     if self.installed.contains(id.as_str()) {
-                        self.model_switch = None;
-                        let id = id.clone();
-                        self.edit_config(cx, |c| c.model.id = id);
+                        self.switching.remove(&offer);
+                        self.edit_config(cx, |c| offer.pick(c));
                     } else if error.as_deref().is_some_and(|e| e.contains("cancelled")) {
-                        self.model_switch = None;
+                        self.switching.remove(&offer);
                     }
                 }
                 if let Some(e) = error {
@@ -471,42 +509,52 @@ impl AppState {
         self.config.onboarded
             && self.config.text.polish
             && bars_core::polish::supported()
-            && !self.installed.contains(models::POLISH.id)
+            && !self.installed.contains(models::polish_model(&self.config.text.polish_model).id)
     }
 
     pub fn active_model(&self) -> Option<&'static models::ModelInfo> {
         models::find(&self.config.model.id)
     }
 
-    /// The recommended speech model, for someone who uses another one and
-    /// hasn't been offered it yet (see `answer_model_offer`); also while it
-    /// downloads to switch to it.
-    pub fn model_offer(&self) -> Option<&'static models::ModelInfo> {
-        let m = models::find(models::DEFAULT_MODEL)?;
-        let switching = self.model_switch.as_deref() == Some(m.id);
+    /// The recommended model of a kind, for someone who uses another one
+    /// and hasn't been offered it yet (see `answer_offer`); also while it
+    /// downloads to switch to it. The polish model is offered only to
+    /// someone polishing with another model they have: turning polish on
+    /// fetches the recommended one anyway.
+    pub fn offer(&self, offer: Offer) -> Option<&'static models::ModelInfo> {
+        let m = offer.model();
+        let current = offer.current(&self.config);
         let new = self.config.onboarded
-            && self.config.model.id != m.id
-            && !self.config.models_offered.iter().any(|id| id == m.id);
-        (switching || new).then_some(m)
+            && current != m.id
+            && !self.config.models_offered.iter().any(|id| id == m.id)
+            && match offer {
+                Offer::Speech => true,
+                Offer::Polish => {
+                    self.config.text.polish && bars_core::polish::supported() && self.installed.contains(current)
+                }
+            };
+        (self.switching.contains(&offer) || new).then_some(m)
     }
 
     /// Switches to the recommended model (once it's downloaded) or not;
     /// either way it isn't offered again.
-    pub fn answer_model_offer(&mut self, switch: bool, cx: &mut Context<Self>) {
-        let id = models::DEFAULT_MODEL;
+    pub fn answer_offer(&mut self, offer: Offer, switch: bool, cx: &mut Context<Self>) {
+        let id = offer.model().id;
         let installed = self.installed.contains(id);
         self.edit_config(cx, |c| {
             if !c.models_offered.iter().any(|o| o == id) {
                 c.models_offered.push(id.to_string());
             }
             if switch && installed {
-                c.model.id = id.to_string();
+                offer.pick(c);
             }
         });
-        self.model_switch = (switch && !installed).then(|| id.to_string());
-        if self.model_switch.is_some() {
+        if switch && !installed {
+            self.switching.insert(offer);
             self.download_errors.remove(id);
             self.send(Command::DownloadModel(id.to_string()));
+        } else {
+            self.switching.remove(&offer);
         }
     }
 

@@ -109,7 +109,8 @@ impl Shell {
                 }
                 UPDATE_NOTIFICATION => this.show_settings(Some(Page::General), cx),
                 POLISH_NOTIFICATION if response.action_id.is_some() => {
-                    this.state.read(cx).send(Command::DownloadModel(models::POLISH.id.to_string()))
+                    let st = this.state.read(cx);
+                    st.send(Command::DownloadModel(models::polish_model(&st.config.text.polish_model).id.to_string()))
                 }
                 POLISH_NOTIFICATION => this.show_settings(Some(Page::Home), cx),
                 _ => {}
@@ -375,7 +376,7 @@ impl Shell {
                 title: "New: Output polish".into(),
                 body: format!(
                     "Bars can now clean up English dictations: fillers, false starts and spoken corrections. It needs a one-time download ({}).",
-                    crate::widgets::fmt_bytes(models::POLISH.size_bytes())
+                    crate::widgets::fmt_bytes(models::polish_model(&st.config.text.polish_model).size_bytes())
                 )
                 .into(),
                 actions: vec![SystemNotificationAction {

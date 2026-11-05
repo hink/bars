@@ -14,11 +14,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use bars_core::controller::{Command, Phase};
 use bars_core::engine::EngineStatus;
-use bars_core::models::ModelInfo;
+use bars_core::models;
 
-use crate::state::{AppState, UpdateStatus};
+use crate::state::{AppState, Offer, UpdateStatus};
 use crate::theme::{FONT, PaletteExt};
-use crate::widgets::{ButtonKind, button, fmt_bytes, h_row, icon, progress_bar, v_col};
+use crate::widgets::{ButtonKind, button, fmt_bytes, h_row, icon, icon_button, progress_bar, v_col};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -83,7 +83,19 @@ pub struct SettingsView {
     pub copied: Option<u64>,
     /// A History entry being corrected, and its editor.
     pub editing: Option<(u64, Entity<TextareaState>)>,
+    /// The sidebar card being shown, when there are several (see
+    /// `render_sidebar`); the first otherwise.
+    notice: Option<Notice>,
     _subs: Vec<Subscription>,
+}
+
+/// A card above Setup in the sidebar. Only one shows at a time, the first
+/// waiting in this order; arrows on it page through the others, and
+/// answering one brings up the next.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Notice {
+    Update,
+    Offer(Offer),
 }
 
 impl SettingsView {
@@ -112,6 +124,7 @@ impl SettingsView {
             page,
             copied: None,
             editing: None,
+            notice: None,
             _subs: subs,
         }
     }
@@ -134,7 +147,18 @@ impl SettingsView {
         let needs_setup = !st.setup_complete();
         let status = status_line(st);
         let update = st.update.offered().map(|r| (r.clone(), st.update.clone()));
-        let offer = st.model_offer();
+        let mut notices = Vec::new();
+        if update.is_some() {
+            notices.push(Notice::Update);
+        }
+        for offer in [Offer::Speech, Offer::Polish] {
+            if st.offer(offer).is_some() {
+                notices.push(Notice::Offer(offer));
+            }
+        }
+        // The one picked with the arrows while it's still there, else the
+        // first.
+        let shown = self.notice.and_then(|n| notices.iter().position(|m| *m == n)).unwrap_or(0);
         let pages = [Page::Home, Page::General, Page::Model, Page::Dictionary, Page::History];
         let item = |page: Page, attention: bool, cx: &mut Context<Self>| {
             let active = self.page == page;
@@ -181,8 +205,14 @@ impl SettingsView {
                     .children(pages.into_iter().map(|page| item(page, false, cx).into_any_element())),
             )
             .child(div().flex_1())
-            .when_some(offer, |el, m| el.child(self.model_banner(m, cx)))
-            .when_some(update, |el, (release, status)| el.child(self.update_banner(release, status, cx)))
+            .when_some(notices.get(shown).copied(), |el, notice| {
+                let card = match (notice, update) {
+                    (Notice::Update, Some((release, status))) => self.update_banner(release, status, cx).into_any_element(),
+                    (Notice::Offer(offer), _) => self.model_banner(offer, cx).into_any_element(),
+                    (Notice::Update, None) => return el,
+                };
+                el.child(card).children(self.pager(&notices, shown, cx))
+            })
             .child(item(Page::Setup, needs_setup, cx))
             .child(
                 h_row()
@@ -256,27 +286,75 @@ impl SettingsView {
 }
 
 impl SettingsView {
-    /// Above Setup, once, for someone using another model when Bars
-    /// recommends a new one: what it is, and a button to switch to it
+    /// Under the sidebar card, when there's more than one: arrows, and
+    /// which one this is ("1 of 2").
+    fn pager(&self, notices: &[Notice], shown: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let n = notices.len();
+        if n < 2 {
+            return None;
+        }
+        let p = cx.palette();
+        let (prev, next) = (notices[(shown + n - 1) % n], notices[(shown + 1) % n]);
+        Some(
+            h_row()
+                .justify_center()
+                .gap(px(4.))
+                .mt(px(-2.))
+                .mb(px(8.))
+                .child(
+                    icon_button("notice-prev", I::ChevronLeft, p.text_muted, p)
+                        .size(px(22.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.notice = Some(prev);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(p.text_muted)
+                        .child(format!("{} of {n}", shown + 1)),
+                )
+                .child(
+                    icon_button("notice-next", I::ChevronRight, p.text_muted, p)
+                        .size(px(22.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.notice = Some(next);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Above Setup, once, for someone using another model of a kind when
+    /// Bars recommends a new one: what it is, and a button to switch to it
     /// (after its download).
-    fn model_banner(&self, m: &'static ModelInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn model_banner(&self, offer: Offer, cx: &mut Context<Self>) -> impl IntoElement {
         let p = cx.palette();
         let st = self.state.read(cx);
-        let switching = st.model_switch.is_some();
+        let m = offer.model();
+        let switching = st.switching.contains(&offer);
         let progress = st.downloads.get(m.id).copied();
         let failed = switching && st.download_errors.contains_key(m.id);
-        let current = st.active_model().map_or("your model", |c| c.name);
+        let better = match offer {
+            Offer::Speech => format!("Fewer mistakes than {}", st.active_model().map_or("your model", |c| c.name)),
+            Offer::Polish => format!(
+                "Better polish than {}: it catches more spoken corrections",
+                models::polish_model(&st.config.text.polish_model).name
+            ),
+        };
         let detail = match progress {
             Some((done, total)) => format!("Downloading… {}%", if total > 0 { done * 100 / total } else { 0 }),
             None if failed => "The download failed.".to_string(),
             None if switching => "Waiting to download…".to_string(),
-            None if st.installed.contains(m.id) => format!("Fewer mistakes than {current}, and it's already downloaded."),
-            None => format!("Fewer mistakes than {current}. Switching downloads {}.", fmt_bytes(m.size_bytes())),
+            None if st.installed.contains(m.id) => format!("{better}, and it's already downloaded."),
+            None => format!("{better}. Switching downloads {}.", fmt_bytes(m.size_bytes())),
         };
         let state = self.state.clone();
         let answer = move |switch: bool| {
             let state = state.clone();
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| state.update(cx, |s, cx| s.answer_model_offer(switch, cx))
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| state.update(cx, |s, cx| s.answer_offer(offer, switch, cx))
         };
         let buttons = match (switching, failed) {
             (true, false) => {

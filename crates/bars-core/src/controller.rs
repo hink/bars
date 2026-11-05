@@ -428,7 +428,7 @@ impl Controller {
         self.emit_hotkey_status();
         self.emit_history();
         self.engine.select(&self.cfg.model.id, self.cfg.model.threads, self.cfg.model.unload_after_mins);
-        self.polisher.configure(self.cfg.text.polish, self.cfg.model.unload_after_mins);
+        self.polisher.configure(self.cfg.text.polish, &self.cfg.text.polish_model, self.cfg.model.unload_after_mins);
         if self.cfg.audio.keep_warm {
             self.audio.set_warm(self.cfg.audio.device.clone(), true);
         }
@@ -1145,7 +1145,7 @@ impl Controller {
                         self.engine.unload();
                         self.emit(Event::Engine(EngineStatus::Missing(id.clone())));
                     }
-                    if id == models::POLISH.id {
+                    if id == models::polish_model(&self.cfg.text.polish_model).id {
                         self.polisher.recheck();
                     }
                     self.emit(Event::DownloadFinished { id, error: None });
@@ -1284,8 +1284,11 @@ impl Controller {
         if cfg.text != old.text {
             self.text = TextProcessor::new(&cfg.text);
         }
-        if cfg.text.polish != old.text.polish || cfg.model.unload_after_mins != old.model.unload_after_mins {
-            self.polisher.configure(cfg.text.polish, cfg.model.unload_after_mins);
+        if cfg.text.polish != old.text.polish
+            || cfg.text.polish_model != old.text.polish_model
+            || cfg.model.unload_after_mins != old.model.unload_after_mins
+        {
+            self.polisher.configure(cfg.text.polish, &cfg.text.polish_model, cfg.model.unload_after_mins);
         }
         if reads_focus(cfg) && !reads_focus(&old) {
             platform::prepare_focus_reading();
@@ -1343,7 +1346,7 @@ impl Controller {
                     let m = &self.cfg.model;
                     self.engine.select(&m.id, m.threads, m.unload_after_mins);
                 }
-                if error.is_none() && id == models::POLISH.id {
+                if error.is_none() && id == models::polish_model(&self.cfg.text.polish_model).id {
                     self.polisher.recheck();
                 }
                 self.emit(Event::DownloadFinished { id, error });

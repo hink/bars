@@ -164,7 +164,8 @@ impl SettingsView {
     /// model, and follow the download.
     fn polish_banner(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let st = self.state.read(cx);
-        let m = &models::POLISH;
+        let m = models::polish_model(&st.config.text.polish_model);
+        let id = m.id;
         let progress = st.downloads.get(m.id).copied();
         let error = st.download_errors.get(m.id).cloned();
         h_row()
@@ -183,7 +184,7 @@ impl SettingsView {
                     .gap(px(2.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("New: Output polish"))
                     .child(div().text_size(px(12.5)).line_height(px(18.)).text_color(p.text_muted).child(format!(
-                        "Bars can now clean up English dictations: fillers, false starts and spoken corrections go, numbers become digits. It needs a one-time download ({}).",
+                        "Bars can now clean up English dictations: fillers, false starts and spoken corrections go. It needs a one-time download ({}).",
                         fmt_bytes(m.size_bytes())
                     )))
                     .when_some(progress, |el, (done, total)| {
@@ -219,9 +220,9 @@ impl SettingsView {
                             },
                         )))
                         .child(button("polish-download", "Download", ButtonKind::Primary, p).on_click(cx.listener(
-                            |this, _, _, cx| {
+                            move |this, _, _, cx| {
                                 this.state.update(cx, |s, cx| {
-                                    s.send(Command::DownloadModel(models::POLISH.id.to_string()));
+                                    s.send(Command::DownloadModel(id.to_string()));
                                     s.edit_config(cx, |c| c.polish_offered = true);
                                 })
                             },

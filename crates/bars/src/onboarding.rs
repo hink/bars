@@ -163,7 +163,7 @@ impl Onboarding {
                 if !st.installed.contains(id.as_str()) && !st.downloads.contains_key(&id) {
                     st.send(Command::DownloadModel(id));
                 }
-                let polish = models::POLISH.id;
+                let polish = models::polish_model(&st.config.text.polish_model).id;
                 if st.config.text.polish
                     && polish::supported()
                     && !st.installed.contains(polish)
@@ -201,9 +201,10 @@ impl Onboarding {
             s.edit_config(cx, |c| {
                 c.onboarded = true;
                 // The model step offered output polish, and the
-                // recommended model.
+                // recommended models.
                 c.polish_offered = true;
                 c.models_offered.push(bars_core::models::DEFAULT_MODEL.to_string());
+                c.models_offered.push(bars_core::models::DEFAULT_POLISH.to_string());
             })
         });
         self.state.read(cx).send(Command::MicTest(false));
@@ -459,8 +460,9 @@ impl Onboarding {
         let polish_card = self.polish_card(p, cx);
         let st = self.state.read(cx);
         let polish_on = st.config.text.polish && polish_card.is_some();
-        let polish_downloading = polish_on && st.downloads.contains_key(models::POLISH.id);
-        let ready = installed && (!polish_on || st.installed.contains(models::POLISH.id));
+        let polish_id = models::polish_model(&st.config.text.polish_model).id;
+        let polish_downloading = polish_on && st.downloads.contains_key(polish_id);
+        let ready = installed && (!polish_on || st.installed.contains(polish_id));
         v_col()
             .gap(px(14.))
             .child(step_icon(I::AudioLines, p))
@@ -567,7 +569,8 @@ impl Onboarding {
             return None;
         }
         let st = self.state.read(cx);
-        let m = &models::POLISH;
+        let m = models::polish_model(&st.config.text.polish_model);
+        let id = m.id;
         let on = st.config.text.polish;
         let installed = st.installed.contains(m.id);
         let progress = st.downloads.get(m.id).copied().filter(|_| on);
@@ -601,11 +604,12 @@ impl Onboarding {
                                         .text_size(px(12.5))
                                         .line_height(px(18.))
                                         .text_color(p.text_muted)
-                                        .child("Cleans up English dictations: drops fillers and false starts, applies spoken corrections, writes numbers as digits."),
+                                        .child("Cleans up English dictations: drops fillers and false starts, and applies spoken corrections."),
                                 )
                                 .child(div().text_size(px(12.)).text_color(p.text_faint).child(format!(
-                                    "Uses {} by Spokenly · {}",
+                                    "Uses {} by {} · {}",
                                     m.name,
+                                    models::polish_maker(m),
                                     fmt_bytes(m.size_bytes())
                                 ))),
                         )
@@ -614,11 +618,11 @@ impl Onboarding {
                             state.update(cx, |s, cx| {
                                 s.edit_config(cx, |c| c.text.polish = v);
                                 if v {
-                                    if !s.installed.contains(models::POLISH.id) {
-                                        s.send(Command::DownloadModel(models::POLISH.id.to_string()));
+                                    if !s.installed.contains(id) {
+                                        s.send(Command::DownloadModel(id.to_string()));
                                     }
                                 } else {
-                                    s.send(Command::CancelDownload(models::POLISH.id.to_string()));
+                                    s.send(Command::CancelDownload(id.to_string()));
                                 }
                             })
                         })),
@@ -641,7 +645,7 @@ impl Onboarding {
                             .gap(px(10.))
                             .child(div().flex_1().text_size(px(12.5)).text_color(p.danger).child(format!("Download failed: {e}")))
                             .child(button("retry-polish", "Try again", ButtonKind::Secondary, p).on_click(cx.listener(
-                                |this, _, _, cx| this.state.read(cx).send(Command::DownloadModel(models::POLISH.id.to_string())),
+                                move |this, _, _, cx| this.state.read(cx).send(Command::DownloadModel(id.to_string())),
                             ))),
                     )
                 })

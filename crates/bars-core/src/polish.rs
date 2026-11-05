@@ -1,12 +1,13 @@
 //! Polish: rewrites an English dictation the way it would have been typed,
-//! with Spokenly Cleanup 1 by Spokenly, a small model (a fine-tune of
-//! Qwen3-0.6B, Apache-2.0) run on this computer by llama.cpp. Filler words,
-//! repeats and false starts go, spoken corrections are applied ("to John,
-//! no wait, to Maria"), numbers become digits. It doesn't answer questions
-//! or carry out instructions in the text, and keeps the speaker's words;
-//! what it returns is checked anyway, and the dictation goes in as heard
-//! when the result adds words or line breaks, loses most of the words, or
-//! takes too long.
+//! with a small model run on this computer by llama.cpp: Muesli 0.8B by
+//! Muesli (a fine-tune of Qwen3.5-0.8B, Apache-2.0) by default, or Spokenly
+//! Cleanup 1 by Spokenly (a fine-tune of Qwen3-0.6B, Apache-2.0). Filler
+//! words, repeats and false starts go, spoken corrections are applied ("to
+//! John, no wait, to Maria"); Spokenly also writes numbers as digits.
+//! Neither answers questions or carries out instructions in the text, and
+//! both keep the speaker's words; what they return is checked anyway, and
+//! the dictation goes in as heard when the result adds words or line
+//! breaks, loses most of the words, or takes too long.
 //!
 //! The model also sees the app and the text around the cursor, which it
 //! uses to continue a sentence and match its tone. Like everything read
@@ -32,7 +33,7 @@ use llama_cpp_2::token::LlamaToken;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
-use crate::models;
+use crate::models::{self, ModelInfo};
 use crate::platform::focus::Focus;
 use crate::text::{Agent, Surroundings};
 
@@ -239,17 +240,71 @@ fn context_lines(app: Option<&str>, field: Option<&Surroundings>) -> String {
         p.push_str(&format!("app: {app}\n"));
     }
     if let Some(f) = field {
-        // Only the current line: what spacing and capitals depend on.
-        let before = f.before.rsplit('\n').next().unwrap_or("").trim_end_matches([' ', '\u{a0}', '\t']);
-        let after = f.after.split('\n').next().unwrap_or("").trim_start_matches([' ', '\u{a0}', '\t']);
-        let before = last_chars(before, CONTEXT_CHARS);
-        let after = first_chars(after, CONTEXT_CHARS);
+        let (before, after) = around_cursor(f);
         if !before.trim().is_empty() {
             p.push_str(&format!("before: {before}\n"));
         }
         if !after.trim().is_empty() {
             p.push_str(&format!("after: {after}\n"));
         }
+    }
+    p
+}
+
+/// The text on each side of the cursor shown to the model: only the
+/// current line, what spacing and capitals depend on.
+fn around_cursor(f: &Surroundings) -> (&str, &str) {
+    let before = f.before.rsplit('\n').next().unwrap_or("").trim_end_matches([' ', '\u{a0}', '\t']);
+    let after = f.after.split('\n').next().unwrap_or("").trim_start_matches([' ', '\u{a0}', '\t']);
+    (last_chars(before, CONTEXT_CHARS), first_chars(after, CONTEXT_CHARS))
+}
+
+/// How a polish model is prompted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// Spokenly Cleanup 1: `key: value` lines, then `text:` and `out:`.
+    Spokenly,
+    /// Muesli: one chat turn holding its instructions, where the dictation
+    /// goes and the dictation, then an empty thinking block.
+    Muesli,
+}
+
+impl Format {
+    pub fn of(info: &ModelInfo) -> Format {
+        if info.id == models::MUESLI.id { Format::Muesli } else { Format::Spokenly }
+    }
+}
+
+/// Muesli's instructions, word for word as it was trained on them.
+const MUESLI_INSTRUCTIONS: &str = "Clean up speech-to-text transcription. Only make changes when there is a clear error. If the text is already correct, output it exactly as-is.
+
+The user input may include an <APP-CONTEXT> section with focused app, document, URL, selected text, or OCR screen text. Use it only to resolve obvious transcription errors, names, acronyms, and formatting intent. Never copy app context into the output unless the user dictated it.
+
+You may: fix obvious misspellings, remove filler words (um, uh, like), apply 'scratch that' deletions, and format numbered or bullet lists when dictated.
+
+Do not: paraphrase, reword, add words, remove meaningful words, change the meaning in any way, wrap the output in markdown, code fences, tags, labels, or commentary, or repeat the output more than once. Preserve the speaker's original phrasing.";
+
+/// What Muesli's turn starts with, before its instructions.
+const MUESLI_TURN: &str = "<|im_start|>";
+/// What follows the dictation: the end of the turn, and the model's turn
+/// with thinking left out.
+const MUESLI_END: &str = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+/// A Muesli prompt up to the dictation, after `MUESLI_TURN`: its
+/// instructions and, when known, the app and the text around the cursor
+/// (as the screen text it was trained to see).
+fn muesli_start(app: Option<&str>, field: Option<&Surroundings>) -> String {
+    let mut p = format!("user\n{MUESLI_INSTRUCTIONS}\n\n");
+    let screen = field.map(around_cursor).map(|(b, a)| format!("{b} {a}").trim().to_string()).filter(|s| !s.is_empty());
+    if app.is_some() || screen.is_some() {
+        p.push_str("<APP-CONTEXT>\n");
+        if let Some(app) = app {
+            p.push_str(&format!("App: {app}\n"));
+        }
+        if let Some(screen) = screen {
+            p.push_str(&format!("OCR screen text: {screen}\n"));
+        }
+        p.push_str("</APP-CONTEXT>\n\n");
     }
     p
 }
@@ -352,7 +407,7 @@ pub struct Job {
 }
 
 enum Cmd {
-    Configure { on: bool, idle_unload: Option<Duration> },
+    Configure { on: bool, model: String, idle_unload: Option<Duration> },
     Prepare { id: u64, focus: Receiver<Focus> },
     Forget(u64),
     Polish(Job),
@@ -377,10 +432,12 @@ impl Polisher {
         Polisher { tx }
     }
 
-    /// Turns polishing on (loading the model right away) or off (freeing it).
-    pub fn configure(&self, on: bool, unload_after_mins: u32) {
+    /// Turns polishing on (loading the model right away) or off (freeing
+    /// it), with the polish model `model` (an id; see
+    /// `models::polish_model`).
+    pub fn configure(&self, on: bool, model: &str, unload_after_mins: u32) {
         let idle_unload = (unload_after_mins > 0).then(|| Duration::from_secs(unload_after_mins as u64 * 60));
-        let _ = self.tx.send(Cmd::Configure { on, idle_unload });
+        let _ = self.tx.send(Cmd::Configure { on, model: model.to_string(), idle_unload });
     }
 
     /// A dictation started: read where it goes (the field being read)
@@ -409,6 +466,8 @@ struct Worker {
     events: Sender<PolishEvent>,
     on: bool,
     idle_unload: Option<Duration>,
+    /// Which polish model to load (an id).
+    model_id: String,
     model: Option<Model>,
     /// The fields of dictations `prepare`d, by id, until their jobs come.
     fields: VecDeque<(u64, Option<Focus>)>,
@@ -428,6 +487,7 @@ impl Worker {
             events,
             on: false,
             idle_unload: None,
+            model_id: models::DEFAULT_POLISH.to_string(),
             model: None,
             fields: VecDeque::new(),
             read_ahead_for: None,
@@ -456,9 +516,16 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => return,
             };
             match cmd {
-                Cmd::Configure { on, idle_unload } => {
+                Cmd::Configure { on, model, idle_unload } => {
                     self.idle_unload = idle_unload;
-                    if on != self.on {
+                    let switched = model != self.model_id;
+                    if switched {
+                        // The other model loads in its place.
+                        self.model_id = model;
+                        self.model = None;
+                        self.read_ahead_for = None;
+                    }
+                    if on != self.on || switched {
                         self.on = on;
                         self.failed = false;
                         self.refresh();
@@ -576,18 +643,18 @@ impl Worker {
                 self.status(PolishStatus::Unsupported);
                 return None;
             }
-            let info = &models::POLISH;
+            let info = models::polish_model(&self.model_id);
             if !info.is_installed() {
                 self.status(PolishStatus::Missing);
                 return None;
             }
             self.status(PolishStatus::Loading);
             let started = Instant::now();
-            match Model::load(&info.dir().join(MODEL_FILE)) {
+            match Model::load(&model_path(info), Format::of(info)) {
                 Ok(mut model) => {
                     // The first run pays for setting up threads and buffers.
                     let _ = model.rewrite("Hello there.", None, None);
-                    log::info!("loaded the polish model in {} ms", started.elapsed().as_millis());
+                    log::info!("loaded the polish model ({}) in {} ms", info.name, started.elapsed().as_millis());
                     self.model = Some(model);
                     self.last_used = Instant::now();
                     self.status(PolishStatus::Ready);
@@ -663,8 +730,10 @@ fn target(focus: Option<&Focus>) -> (Option<String>, Option<&Surroundings>) {
     (focus.and_then(app_name), field)
 }
 
-/// The model file, inside the model's directory.
-pub const MODEL_FILE: &str = "cleanup-1-q8_0.gguf";
+/// Where a polish model's model file is (its first file).
+pub fn model_path(info: &ModelInfo) -> std::path::PathBuf {
+    info.dir().join(info.files[0].name)
+}
 
 /// llama.cpp, set up once per process; its log goes to ours.
 fn backend() -> anyhow::Result<&'static LlamaBackend> {
@@ -706,6 +775,12 @@ pub struct Model {
     ahead: Option<ReadAhead>,
     model: LlamaModel,
     threads: i32,
+    format: Format,
+    /// Guesses ahead (see `complete`): not for a model with recurrent
+    /// layers (Qwen3.5), whose state can't be wound back past a wrong guess.
+    drafts: bool,
+    /// The size of a context read ahead (see `AHEAD_CTX`).
+    ahead_ctx: u32,
 }
 
 struct ReadAhead {
@@ -722,27 +797,60 @@ pub struct Rewrite {
 }
 
 impl Model {
-    pub fn load(path: &Path) -> anyhow::Result<Model> {
+    pub fn load(path: &Path, format: Format) -> anyhow::Result<Model> {
         let backend = backend()?;
         let model = LlamaModel::load_from_file(backend, path, &LlamaModelParams::default()).map_err(|e| anyhow!("{e}"))?;
-        Ok(Model { ahead: None, model, threads: threads() as i32 })
+        let drafts = !model.is_recurrent() && !model.is_hybrid();
+        // Muesli's instructions take about 230 tokens of it.
+        let ahead_ctx = match format {
+            Format::Spokenly => AHEAD_CTX,
+            Format::Muesli => AHEAD_CTX + 512,
+        };
+        Ok(Model { ahead: None, model, threads: threads() as i32, format, drafts, ahead_ctx })
+    }
+
+    /// The prompt's first part, about where the dictation goes (empty for
+    /// Spokenly without app or field), and the whole prompt, as tokens.
+    fn prompt_tokens(&self, text: Option<&str>, app: Option<&str>, field: Option<&Surroundings>) -> (Vec<LlamaToken>, Vec<LlamaToken>) {
+        let vocab = self.model.vocab();
+        match self.format {
+            Format::Spokenly => {
+                let lines = vocab.tokenize(context_lines(app, field).as_bytes(), false, false);
+                let all = text.map(|t| vocab.tokenize(prompt(t, app, field).as_bytes(), false, false)).unwrap_or_default();
+                (lines, all)
+            }
+            Format::Muesli => {
+                // The template's markers are special tokens; nothing that
+                // was said or read from the field can be one.
+                let mut start = vocab.tokenize(MUESLI_TURN.as_bytes(), false, true);
+                start.extend(vocab.tokenize(muesli_start(app, field).as_bytes(), false, false));
+                let all = text
+                    .map(|t| {
+                        let mut all = start.clone();
+                        all.extend(vocab.tokenize(t.trim().as_bytes(), false, false));
+                        all.extend(vocab.tokenize(MUESLI_END.as_bytes(), false, true));
+                        all
+                    })
+                    .unwrap_or_default();
+                (start, all)
+            }
+        }
     }
 
     /// Reads the lines of the next prompt that say where the dictation
-    /// goes (app, text around the cursor) while the user is still talking,
-    /// so `rewrite` then only reads the dictation. `rewrite` reads its
-    /// prompt in these same two steps either way, and uses this only when
-    /// its prompt starts with exactly these tokens, so the result is the
-    /// same to the bit. Returns how many tokens it read (none without app
-    /// or field).
+    /// goes (app, text around the cursor; Muesli's instructions too) while
+    /// the user is still talking, so `rewrite` then only reads the
+    /// dictation. `rewrite` reads its prompt in these same two steps either
+    /// way, and uses this only when its prompt starts with exactly these
+    /// tokens, so the result is the same to the bit. Returns how many
+    /// tokens it read (none for Spokenly without app or field).
     pub fn prepare(&mut self, app: Option<&str>, field: Option<&Surroundings>) -> anyhow::Result<usize> {
         self.ahead = None;
-        let lines = context_lines(app, field);
-        if lines.is_empty() {
+        let (tokens, _) = self.prompt_tokens(None, app, field);
+        if tokens.is_empty() {
             return Ok(0);
         }
-        let tokens = self.model.vocab().tokenize(lines.as_bytes(), false, false);
-        let mut ctx = self.context(AHEAD_CTX)?;
+        let mut ctx = self.context(self.ahead_ctx)?;
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         for (i, t) in tokens.iter().enumerate() {
             batch.add(*t, i as i32, &[0], false)?;
@@ -770,7 +878,8 @@ impl Model {
         let max = tokens * 3 / 2 + 16;
         // About a second more than slow machines take for this much text.
         let deadline = Instant::now() + Duration::from_millis(1000 + 25 * tokens as u64);
-        let mut rewrite = self.complete(&context_lines(app, field), &prompt(text, app, field), max, deadline)?;
+        let (lines, prompt) = self.prompt_tokens(Some(text), app, field);
+        let mut rewrite = self.complete(&lines, &prompt, max, deadline)?;
         rewrite.text = rewrite.text.map(|t| drop_am_pm(&t));
         Ok(rewrite)
     }
@@ -796,11 +905,8 @@ impl Model {
     /// decoding keeps exactly the guesses the model would have made one at
     /// a time, so the output is the same; long dictations take about half
     /// the time.
-    fn complete(&mut self, lines: &str, prompt: &str, max: usize, deadline: Instant) -> anyhow::Result<Rewrite> {
-        let vocab = self.model.vocab();
-        let prompt_tokens = vocab.tokenize(prompt.as_bytes(), false, false);
-        let lines_tokens = vocab.tokenize(lines.as_bytes(), false, false);
-        let split = if prompt_tokens.len() > lines_tokens.len() && prompt_tokens.starts_with(&lines_tokens) {
+    fn complete(&mut self, lines_tokens: &[LlamaToken], prompt_tokens: &[LlamaToken], max: usize, deadline: Instant) -> anyhow::Result<Rewrite> {
+        let split = if prompt_tokens.len() > lines_tokens.len() && prompt_tokens.starts_with(lines_tokens) {
             lines_tokens.len()
         } else {
             0
@@ -813,7 +919,7 @@ impl Model {
             Some(a) => (a.ctx, split),
             // With context lines, the same size as one read ahead (where it
             // fits): the same computation, to the bit.
-            None if split > 0 => (self.context((need as u32).max(AHEAD_CTX).next_multiple_of(256))?, 0),
+            None if split > 0 => (self.context((need as u32).max(self.ahead_ctx).next_multiple_of(256))?, 0),
             None => (self.context(need.next_multiple_of(256) as u32)?, 0),
         };
         let vocab = self.model.vocab();
@@ -841,7 +947,7 @@ impl Model {
             if out.len() > max || Instant::now() > deadline {
                 return Ok(Rewrite { text: None, read_ahead });
             }
-            let drafts = lookup(&prompt_tokens, &out);
+            let drafts = if self.drafts { lookup(prompt_tokens, &out) } else { Vec::new() };
             batch.clear();
             batch.add(next, pos, &[0], true)?;
             for (i, d) in drafts.iter().enumerate() {
@@ -857,8 +963,8 @@ impl Model {
                 predicted = argmax(&ctx, kept as i32);
             }
             pos += 1 + kept as i32;
-            if kept < drafts.len() {
-                ctx.clear_kv_cache_seq(Some(0), Some(pos as u32), None).map_err(|e| anyhow!("{e}"))?;
+            if kept < drafts.len() && !ctx.clear_kv_cache_seq(Some(0), Some(pos as u32), None).map_err(|e| anyhow!("{e}"))? {
+                anyhow::bail!("couldn't take back the wrong guesses");
             }
             next = predicted;
         }
@@ -1013,13 +1119,29 @@ mod tests {
         assert_eq!(first_chars("one two three", 7), "one two");
     }
 
+    #[test]
+    fn builds_the_muesli_prompt() {
+        let start = format!("user\n{MUESLI_INSTRUCTIONS}\n\n");
+        assert_eq!(muesli_start(None, None), start);
+        assert!(MUESLI_INSTRUCTIONS.starts_with("Clean up speech-to-text") && MUESLI_INSTRUCTIONS.ends_with("original phrasing."));
+        assert_eq!(MUESLI_INSTRUCTIONS.matches("\n\n").count(), 3);
+        let f = Surroundings { before: "Dear Sam,\n\nI think we should ".into(), selected: String::new(), after: "\nBest".into() };
+        assert_eq!(
+            muesli_start(Some("Mail"), Some(&f)),
+            format!("{start}<APP-CONTEXT>\nApp: Mail\nOCR screen text: I think we should\n</APP-CONTEXT>\n\n")
+        );
+        assert_eq!(muesli_start(Some("Slack"), None), format!("{start}<APP-CONTEXT>\nApp: Slack\n</APP-CONTEXT>\n\n"));
+        let empty = Surroundings::default();
+        assert_eq!(muesli_start(None, Some(&empty)), start);
+    }
+
     /// Needs the model downloaded: `cargo test -p bars-core -- --ignored polisher`.
     #[test]
     #[ignore]
     fn polisher_keeps_order_and_passes_the_field_on() {
         let (tx, rx) = unbounded();
         let polisher = Polisher::spawn(tx);
-        polisher.configure(true, 0);
+        polisher.configure(true, models::SPOKENLY.id, 0);
         loop {
             match rx.recv_timeout(Duration::from_secs(60)).expect("status") {
                 PolishEvent::Status(PolishStatus::Ready) => break,
@@ -1063,7 +1185,7 @@ mod tests {
                 break;
             }
         }
-        polisher.configure(false, 0);
+        polisher.configure(false, models::SPOKENLY.id, 0);
         assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(PolishEvent::Status(PolishStatus::Off))));
     }
 
@@ -1082,14 +1204,21 @@ mod tests {
         assert_eq!(piece_field(None, "First.", false).unwrap().before, "First.");
     }
 
-    /// Needs the model downloaded: `cargo test --release -p bars-core -- --ignored reading_ahead`.
+    /// Needs the models downloaded: `cargo test --release -p bars-core -- --ignored reading_ahead`.
     /// Reading where a dictation goes ahead of it must not change what the
     /// model writes. testdata/polish.txt: one dictation per line,
     /// `before|text|after` for the text around the cursor.
     #[test]
     #[ignore]
     fn reading_ahead_changes_nothing() {
-        let mut model = Model::load(&models::POLISH.dir().join(MODEL_FILE)).expect("model downloaded");
+        let installed: Vec<_> = models::POLISH_MODELS.iter().filter(|m| m.is_installed()).collect();
+        assert!(!installed.is_empty(), "no polish model downloaded");
+        for info in installed {
+            reads_ahead_the_same(Model::load(&model_path(info), Format::of(info)).expect("model loads"));
+        }
+    }
+
+    fn reads_ahead_the_same(mut model: Model) {
         let cases = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/polish.txt")).unwrap();
         let mut compared = 0;
         for line in cases.lines().filter(|l| !l.trim().is_empty()) {
