@@ -294,7 +294,8 @@ crates/bars        GPUI app: tray, overlay pill, settings window
 third_party/        gpui-pre-linux with a Wayland frame-waker fix, and
                     transcribe-rs reporting Parakeet's token confidences
                     (see the .patch files)
-packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest, macOS Info.plist and icon
+packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest, macOS Info.plist and icon,
+                    Windows icon (scripts/windows-icon.py; embedded in bars.exe with its version by crates/bars/build.rs)
 scripts/smoke/      Windows/macOS runtime smoke tests run by CI
 ```
 
