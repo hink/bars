@@ -157,6 +157,10 @@ jobs:
     name: macOS (Apple Silicon)
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'macOS'
     runs-on: macos-15
+    # llama.cpp's bundled HTTP library (which Bars doesn't use) finds the
+    # runner's Homebrew OpenSSL, then fails to configure against it.
+    env:
+      CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: "ON"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
