@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "bars"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "bars-core"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "arboard",

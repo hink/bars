@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.8.4" date="2026-11-05">
+      <description>
+        <ul>
+          <li>Windows: bars.exe carries the Bars icon and its version number, so Explorer, the Start menu, Apps &amp; features, Task Manager and device management tools such as Intune show them. The installer has the Bars icon too.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.3" date="2026-11-05">
       <description>
         <ul>
