@@ -36,6 +36,15 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.8.3" date="2026-11-05">
+      <description>
+        <ul>
+          <li>Output polish uses a new model by default, Muesli 0.8B: it catches more spoken corrections and false starts. Spokenly Cleanup 1 is still on the Models page, and people already using it are offered Muesli once.</li>
+          <li>Polish models are cards on the Models page, like the speech models.</li>
+          <li>The settings sidebar shows one notice at a time, with arrows to page through the rest.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.2" date="2026-11-03">
       <description>
         <ul>
