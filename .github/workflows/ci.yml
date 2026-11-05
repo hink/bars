@@ -51,7 +51,7 @@ jobs:
         # and script are picked by name below.)
         exclude:
           - name: ${{ inputs.platform == 'Windows' && 'macOS' || (inputs.platform == 'macOS' && 'Windows' || 'none') }}
-    runs-on: ${{ matrix.name == 'Windows' && 'windows-latest' || 'macos-14' }}
+    runs-on: ${{ matrix.name == 'Windows' && 'windows-latest' || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -156,7 +156,7 @@ jobs:
   macos:
     name: macOS (Apple Silicon)
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'macOS'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
