@@ -36,6 +36,23 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.9.0" date="2026-11-12">
+      <description>
+        <ul>
+          <li>Fixes from a review of the whole app: fillers are only removed from English dictations, a microphone that can't be opened says so, and model downloads are checked and carry on where they stopped.</li>
+          <li>Fillers: "um" is a word in Portuguese and German, so it stays in dictations that aren't English. In English, "5 mm" and "uh-huh" stay too.</li>
+          <li>Windows: pasting works on keyboard layouts without a Latin V (Russian, Greek, Hebrew), keys remapped by PowerToys or AutoHotkey can be shortcuts, an update installs once no dictation is under way, and apps left muted when Bars was killed are unmuted once they start.</li>
+          <li>Recording a shortcut stops when its window closes and gives up after 30 seconds, instead of taking the next keys pressed anywhere. A key Bars has no name for no longer records the modifier held with it.</li>
+          <li>The setup assistant's microphone test ends when its window closes, and nothing is recorded while it runs.</li>
+          <li>Models download from pinned revisions, are checked against a checksum, give up when the connection stalls, and carry on from where they stopped.</li>
+          <li>Learning from corrections no longer makes a rule from an everyday word at the start of a sentence ("Your" to "You're").</li>
+          <li>A dictation that ends in "new line" keeps the break, words like iPhone and .env keep their capitals and spacing, and snippets go in exactly as written.</li>
+          <li>Problems show in the settings window and are logged, and long ones are shortened in the pill instead of dropped.</li>
+          <li>A recording ends by itself after 30 minutes and inserts what was said.</li>
+          <li>Linux: "Use desktop shortcuts instead" is undone once keyboard access is granted. macOS: a held shortcut ends when macOS switches the key listener back on.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.4" date="2026-11-05">
       <description>
         <ul>
