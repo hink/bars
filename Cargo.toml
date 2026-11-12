@@ -20,6 +20,10 @@ opt-level = 2
 # Local fix: GPUI's Wayland windows never received a frame waker, so views
 # updated from background events (not input) didn't repaint until the next
 # input event. Remove once upstream gpui-pre implements `frame_waker`.
+#
+# A patch replaces one version. gpui-kit is pinned exactly (crates/bars) so
+# that `cargo update` can't move gpui-pre past the one patched here: Cargo
+# would only warn, and the fix would be gone. CI fails if that ever happens.
 [patch.crates-io]
 gpui-pre-linux = { path = "third_party/gpui-pre-linux" }
 # Parakeet also reports how sure it was of each token, and its vocabulary,

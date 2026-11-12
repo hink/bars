@@ -169,12 +169,12 @@ fn open_devices(existing: &HashMap<PathBuf, Device>, mice: bool) -> HashMap<Path
         if !is_event || existing.contains_key(&path) {
             continue;
         }
-        if let Ok(dev) = Device::open(&path) {
-            if (is_keyboard(&dev) || (mice && is_mouse(&dev))) && dev.set_nonblocking(true).is_ok() {
-                log::debug!("hotkeys: watching {} ({})", path.display(), dev.name().unwrap_or("?"));
-                ignore_motion(&dev);
-                out.insert(path, dev);
-            }
+        if let Ok(dev) = Device::open(&path)
+            && (is_keyboard(&dev) || (mice && is_mouse(&dev))) && dev.set_nonblocking(true).is_ok()
+        {
+            log::debug!("hotkeys: watching {} ({})", path.display(), dev.name().unwrap_or("?"));
+            ignore_motion(&dev);
+            out.insert(path, dev);
         }
     }
     out
@@ -361,10 +361,10 @@ impl Listener {
             match dev.fetch_events() {
                 Ok(events) => {
                     for ev in events {
-                        if let EventSummary::Key(_, code, value) = ev.destructure() {
-                            if is_tracked(code) {
-                                keys.push((code, value));
-                            }
+                        if let EventSummary::Key(_, code, value) = ev.destructure()
+                            && is_tracked(code)
+                        {
+                            keys.push((code, value));
                         }
                     }
                 }
@@ -377,8 +377,19 @@ impl Listener {
         }
         if gone {
             self.devices.remove(path);
-            self.pressed.remove(path);
-            self.held.remove(path);
+            let pressed = self.pressed.remove(path).unwrap_or_default();
+            // While it was held, its keys went through the virtual
+            // keyboard: let go of them there, or they'd stay pressed for
+            // as long as Bars runs.
+            if self.held.remove(path)
+                && let Some(kb) = self.forward.as_mut()
+            {
+                for key in pressed {
+                    if !self.filter.is_dropped(key.code() as u32) {
+                        let _ = kb.emit_key(key, 0);
+                    }
+                }
+            }
             self.evaluate(None);
             return;
         }

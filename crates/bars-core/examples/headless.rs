@@ -11,7 +11,7 @@ fn main() {
     env_logger::init();
     let secs: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cfg = Config::load_or_default(&bars_core::paths::config_file());
-    let (tx, rx) = async_channel::bounded(1024);
+    let (tx, rx) = async_channel::unbounded();
     let _handle = controller::spawn(cfg, tx);
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(secs) {

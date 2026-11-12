@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -167,6 +168,8 @@ impl Recording {
 
 enum Cmd {
     Start { device: Option<String>, warm: bool },
+    /// Open the microphone only to show its level; nothing is recorded.
+    Meter { device: Option<String>, on: bool },
     Stop(Sender<Recording>),
     Cancel,
     Warm { device: Option<String>, warm: bool },
@@ -183,6 +186,9 @@ pub enum Cue {
 
 struct Shared {
     capturing: bool,
+    /// Levels are reported, though nothing is recorded (the microphone
+    /// test).
+    metering: bool,
     rate: u32,
     channels: u16,
     buf: Vec<f32>,
@@ -197,9 +203,12 @@ pub struct Audio {
     tx: Sender<Cmd>,
     shared: Arc<Mutex<Shared>>,
     levels: LevelSink,
+    problems: ProblemSink,
 }
 
 pub type LevelSink = Arc<dyn Fn(f32) + Send + Sync>;
+/// Told why the microphone couldn't be opened for a recording or a test.
+pub type ProblemSink = Arc<dyn Fn(String) + Send + Sync>;
 
 /// How long `Audio::stop` waits for the audio thread.
 const STOP_WAIT: Duration = Duration::from_secs(3);
@@ -215,21 +224,22 @@ pub struct Stopped {
 
 impl Audio {
     /// `levels` receives a smoothed 0..1 input level ~60 times per second
-    /// while recording (drives the overlay waveform).
-    pub fn spawn(levels: LevelSink) -> Audio {
+    /// while recording (drives the overlay waveform). `problems` hears when
+    /// the microphone couldn't be opened.
+    pub fn spawn(levels: LevelSink, problems: ProblemSink) -> Audio {
         let (tx, rx) = unbounded();
-        let thread = AudioThread::new(levels.clone());
+        let thread = AudioThread::new(levels.clone(), problems.clone());
         let shared = thread.shared.clone();
         thread::Builder::new()
             .name("bars-audio".into())
             .spawn(move || thread.run(rx))
             .expect("spawn audio thread");
-        Audio { tx, shared, levels }
+        Audio { tx, shared, levels, problems }
     }
 
     /// A new audio thread in place of a stuck one, which is left behind.
     pub fn respawn(&self) -> Audio {
-        Audio::spawn(self.levels.clone())
+        Audio::spawn(self.levels.clone(), self.problems.clone())
     }
 
     pub fn start(&self, device: Option<String>, warm: bool) {
@@ -269,6 +279,12 @@ impl Audio {
         let _ = self.tx.send(Cmd::Cancel);
     }
 
+    /// Opens the microphone to report its level without recording (the
+    /// setup assistant's microphone test), or stops that.
+    pub fn meter(&self, device: Option<String>, on: bool) {
+        let _ = self.tx.send(Cmd::Meter { device, on });
+    }
+
     /// Open (or close) the microphone ahead of time.
     pub fn set_warm(&self, device: Option<String>, warm: bool) {
         let _ = self.tx.send(Cmd::Warm { device, warm });
@@ -281,18 +297,25 @@ impl Audio {
 
 struct AudioThread {
     levels: LevelSink,
+    problems: ProblemSink,
     shared: Arc<Mutex<Shared>>,
     stream: Option<(cpal::Stream, Option<String>)>,
+    /// The open stream reported an error it won't recover from (the
+    /// microphone was unplugged): it's reopened when next needed.
+    dead: Arc<AtomicBool>,
     warm: bool,
     cue_stream: Option<(cpal::Stream, Instant)>,
 }
 
 impl AudioThread {
-    fn new(levels: LevelSink) -> Self {
+    fn new(levels: LevelSink, problems: ProblemSink) -> Self {
         AudioThread {
             levels,
+            problems,
+            dead: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(Mutex::new(Shared {
                 capturing: false,
+                metering: false,
                 rate: SAMPLE_RATE,
                 channels: 1,
                 buf: Vec::new(),
@@ -328,15 +351,43 @@ impl AudioThread {
                     self.warm = warm;
                     if let Err(e) = self.ensure_stream(device) {
                         log::error!("microphone: {e:#}");
+                        self.shared.lock().metering = false;
+                        (self.problems)(format!("{e:#}"));
                         continue;
                     }
                     let mut s = self.shared.lock();
+                    s.metering = false;
                     s.buf.clear();
+                    // Room for half a minute, so the microphone's callback
+                    // rarely has to wait for the buffer to grow.
+                    let room = s.rate as usize * 30;
+                    s.buf.reserve(room);
                     // Pre-roll: audio from just before the hotkey press.
                     let pre: Vec<f32> = s.preroll.drain(..).collect();
                     s.buf.extend(pre);
                     s.peak = 0.0;
                     s.capturing = true;
+                }
+                Cmd::Meter { device, on: true } => {
+                    if let Err(e) = self.ensure_stream(device) {
+                        log::error!("microphone: {e:#}");
+                        (self.problems)(format!("{e:#}"));
+                        continue;
+                    }
+                    self.shared.lock().metering = true;
+                }
+                Cmd::Meter { on: false, .. } => {
+                    let capturing = {
+                        let mut s = self.shared.lock();
+                        s.metering = false;
+                        s.capturing
+                    };
+                    if !capturing {
+                        (self.levels)(0.0);
+                        if !self.warm {
+                            self.stream = None;
+                        }
+                    }
                 }
                 Cmd::Stop(reply) => {
                     let rec = self.finish();
@@ -351,7 +402,7 @@ impl AudioThread {
                         if let Err(e) = self.ensure_stream(device) {
                             log::warn!("could not pre-open microphone: {e:#}");
                         }
-                    } else if !self.shared.lock().capturing {
+                    } else if !self.in_use() {
                         self.stream = None;
                     }
                 }
@@ -364,26 +415,35 @@ impl AudioThread {
         }
     }
 
+    /// The microphone is recording or being metered.
+    fn in_use(&self) -> bool {
+        let s = self.shared.lock();
+        s.capturing || s.metering
+    }
+
     fn finish(&mut self) -> Recording {
-        let (raw, rate, peak) = {
+        let (raw, rate, peak, metering) = {
             let mut s = self.shared.lock();
             s.capturing = false;
-            (std::mem::take(&mut s.buf), s.rate, s.peak)
+            (std::mem::take(&mut s.buf), s.rate, s.peak, s.metering)
         };
-        (self.levels)(0.0);
-        if !self.warm {
-            self.stream = None;
+        if !metering {
+            (self.levels)(0.0);
+            if !self.warm {
+                self.stream = None;
+            }
         }
         Recording { samples: raw, rate, peak }
     }
 
     fn ensure_stream(&mut self, device: Option<String>) -> anyhow::Result<()> {
-        if let Some((_, current)) = &self.stream {
-            if *current == device {
-                return Ok(());
-            }
+        if let Some((_, current)) = &self.stream
+            && *current == device && !self.dead.load(Ordering::Relaxed)
+        {
+            return Ok(());
         }
         self.stream = None;
+        self.dead.store(false, Ordering::Relaxed);
         let host = cpal::default_host();
         let dev = match &device {
             Some(id) => id
@@ -431,22 +491,39 @@ impl AudioThread {
     {
         let shared = self.shared.clone();
         let levels = self.levels.clone();
+        let dead = self.dead.clone();
         let channels = config.channels as usize;
         // Level meter: RMS over ~16 ms blocks with fast attack / slow release.
         let block = (config.sample_rate as usize / 60).max(64);
         let mut acc = 0.0f32;
         let mut n = 0usize;
         let mut smooth = 0.0f32;
+        let mut loudest = LoudestChannel::new(channels);
         let stream = dev.build_input_stream::<T, _, _>(
             config,
             move |data: &[T], _| {
+                // An interface with many inputs has the microphone on one
+                // of them: averaging them all would bury it.
+                let only = (channels > 2).then(|| {
+                    loudest.pick(data.chunks(channels).map(|frame| frame.iter().map(|x| x.to_sample::<f32>())))
+                });
                 let mut s = shared.lock();
-                let capturing = s.capturing;
+                let (capturing, metering) = (s.capturing, s.metering);
                 for frame in data.chunks(channels) {
-                    let v = frame.iter().map(|x| x.to_sample::<f32>()).sum::<f32>() / channels as f32;
+                    let v = match only {
+                        Some(c) => frame.get(c).map_or(0.0, |x| x.to_sample::<f32>()),
+                        None => frame.iter().map(|x| x.to_sample::<f32>()).sum::<f32>() / channels as f32,
+                    };
                     if capturing {
                         s.buf.push(v);
                         s.peak = s.peak.max(v.abs());
+                    } else if s.preroll_cap > 0 {
+                        if s.preroll.len() >= s.preroll_cap {
+                            s.preroll.pop_front();
+                        }
+                        s.preroll.push_back(v);
+                    }
+                    if capturing || metering {
                         acc += v * v;
                         n += 1;
                         if n >= block {
@@ -458,15 +535,17 @@ impl AudioThread {
                             acc = 0.0;
                             n = 0;
                         }
-                    } else if s.preroll_cap > 0 {
-                        if s.preroll.len() >= s.preroll_cap {
-                            s.preroll.pop_front();
-                        }
-                        s.preroll.push_back(v);
                     }
                 }
             },
-            |e| log::error!("microphone stream error: {e}"),
+            move |e| {
+                log::error!("microphone stream error: {e}");
+                // A rerouted stream or a late buffer carries on; after
+                // anything else the stream may never deliver again.
+                if !matches!(e.kind(), cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::Xrun) {
+                    dead.store(true, Ordering::Relaxed);
+                }
+            },
             None,
         )?;
         Ok(stream)
@@ -505,6 +584,43 @@ impl AudioThread {
         stream.play()?;
         self.cue_stream = Some((stream, Instant::now()));
         Ok(())
+    }
+}
+
+/// Which input of a many-channel interface carries the microphone: the one
+/// with the most signal lately. It changes only when another is clearly
+/// louder, so two inputs at a similar level don't trade places.
+struct LoudestChannel {
+    energy: Vec<f32>,
+    current: usize,
+}
+
+impl LoudestChannel {
+    fn new(channels: usize) -> Self {
+        LoudestChannel { energy: vec![0.0; channels], current: 0 }
+    }
+
+    /// Takes the frames of one callback and returns the channel to use.
+    fn pick<F: Iterator<Item = f32>>(&mut self, frames: impl Iterator<Item = F>) -> usize {
+        // Earlier callbacks count for less.
+        for e in &mut self.energy {
+            *e *= 0.9;
+        }
+        for frame in frames {
+            for (e, v) in self.energy.iter_mut().zip(frame) {
+                *e += v * v;
+            }
+        }
+        let (best, most) = self
+            .energy
+            .iter()
+            .copied()
+            .enumerate()
+            .fold((self.current, 0.0f32), |best, (i, e)| if e > best.1 { (i, e) } else { best });
+        if most > self.energy.get(self.current).copied().unwrap_or(0.0) * 2.0 {
+            self.current = best;
+        }
+        self.current
     }
 }
 
@@ -712,6 +828,22 @@ fn synth_cue(cue: Cue, rate: u32, volume: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_input_with_the_microphone() {
+        let mut loudest = LoudestChannel::new(4);
+        // Noise on every input, speech on the third.
+        let frames = |speech: f32| {
+            (0..160).map(move |i| {
+                let noise = 0.001 * ((i % 7) as f32 - 3.0);
+                [noise, -noise, speech * (i as f32 * 0.3).sin(), noise].into_iter()
+            })
+        };
+        assert_eq!(loudest.pick(frames(0.0)), 0);
+        assert_eq!(loudest.pick(frames(0.2)), 2);
+        // It stays there through a pause.
+        assert_eq!(loudest.pick(frames(0.0)), 2);
+    }
 
     #[test]
     fn resample_preserves_tone() {

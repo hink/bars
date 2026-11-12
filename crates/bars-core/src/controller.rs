@@ -101,6 +101,8 @@ pub enum Event {
     Download { id: String, done: u64, total: u64 },
     DownloadFinished { id: String, error: Option<String> },
     Captured(Chord),
+    /// Recording a shortcut ended without one (nothing was pressed in time).
+    CaptureEnded,
     /// A dictation finished (always sent; carries only the text).
     Transcript(String),
     /// A dictation was added to the history (only while history is saved).
@@ -133,6 +135,8 @@ pub enum Event {
     Restart,
 }
 
+/// Where the UI's events go. An unbounded channel: state changes are never
+/// dropped, and microphone levels are skipped while the UI is behind.
 pub type EventSender = async_channel::Sender<Event>;
 
 #[derive(Clone)]
@@ -223,6 +227,8 @@ enum Field {
     Now,
 }
 
+// Sent one at a time to the insert thread: the text's size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 enum InsertJob {
     Text {
         text: String,
@@ -262,6 +268,18 @@ const SETTLED_READS: u32 = 3;
 const MISSES_ALLOWED: u32 = 5;
 /// Recent dictations whose model confidences are kept for learning.
 const HEARD_KEPT: usize = 32;
+/// A recording ends by itself after this long: a hands-free dictation left
+/// on (or a shortcut whose release went missing) would otherwise record,
+/// and keep in memory, everything said in the room.
+const MAX_RECORDING: Duration = Duration::from_secs(30 * 60);
+/// Recording a shortcut gives up after this long, so one left waiting (the
+/// settings window was closed) doesn't take the next keys pressed anywhere.
+const CAPTURE_FOR: Duration = Duration::from_secs(30);
+/// A shortcut held this long with next to no audio to show for it means the
+/// microphone isn't delivering.
+const SILENT_MIC_AFTER: Duration = Duration::from_millis(500);
+/// Microphone levels the UI hasn't taken yet, beyond which more are skipped.
+const LEVELS_QUEUED: usize = 64;
 /// How often macOS is asked whether another app holds secure input.
 const SECURE_INPUT_POLL: Duration = Duration::from_secs(3);
 /// Secure input held this long (not just a password typed in passing) is
@@ -272,6 +290,8 @@ struct Controller {
     cfg: Config,
     ui: EventSender,
     audio: Audio,
+    /// Why the microphone couldn't be opened, from the audio thread.
+    audio_rx: Receiver<String>,
     engine: Engine,
     engine_rx: Receiver<EngineEvent>,
     polisher: Polisher,
@@ -304,6 +324,8 @@ struct Controller {
     /// Engine requests for pieces: the dictation and which piece.
     part_of: HashMap<u64, (u64, usize)>,
     capturing: bool,
+    /// When recording a shortcut gives up.
+    capture_until: Option<Instant>,
     mic_testing: bool,
     bound_trigger: Option<String>,
     internal_tx: Sender<Internal>,
@@ -338,9 +360,18 @@ struct Controller {
 impl Controller {
     fn new(cfg: Config, ui: EventSender) -> Self {
         let level_ui = ui.clone();
-        let audio = Audio::spawn(Arc::new(move |level| {
-            let _ = level_ui.try_send(Event::Level(level));
-        }));
+        let (audio_tx, audio_rx) = unbounded();
+        let audio = Audio::spawn(
+            Arc::new(move |level| {
+                // Only fresh levels are worth drawing.
+                if level_ui.len() < LEVELS_QUEUED {
+                    let _ = level_ui.try_send(Event::Level(level));
+                }
+            }),
+            Arc::new(move |problem| {
+                let _ = audio_tx.send(problem);
+            }),
+        );
         let (engine_tx, engine_rx) = unbounded();
         let engine = Engine::spawn(engine_tx);
         let (polish_tx, polish_rx) = unbounded();
@@ -359,6 +390,7 @@ impl Controller {
             cfg,
             ui,
             audio,
+            audio_rx,
             engine,
             engine_rx,
             polisher,
@@ -382,6 +414,7 @@ impl Controller {
             parts: HashMap::new(),
             part_of: HashMap::new(),
             capturing: false,
+            capture_until: None,
             mic_testing: false,
             bound_trigger: None,
             last_requirements: Vec::new(),
@@ -404,8 +437,16 @@ impl Controller {
         let _ = self.ui.try_send(e);
     }
 
+    /// Tells the user something. Problems go to the log as well: the UI
+    /// shows a notice only briefly, and not at all while it's hidden.
     fn notice(&self, kind: NoticeKind, text: impl Into<String>) {
-        self.emit(Event::Notice { kind, text: text.into() });
+        let text = text.into();
+        match kind {
+            NoticeKind::Error => log::error!("{text}"),
+            NoticeKind::Warning => log::warn!("{text}"),
+            NoticeKind::Info => {}
+        }
+        self.emit(Event::Notice { kind, text });
     }
 
     fn set_phase(&mut self, phase: Phase) {
@@ -427,7 +468,7 @@ impl Controller {
         self.emit_permissions();
         self.emit_hotkey_status();
         self.emit_history();
-        self.engine.select(&self.cfg.model.id, self.cfg.model.threads, self.cfg.model.unload_after_mins);
+        self.engine.select(&self.cfg.model.id, self.cfg.model.unload_after_mins);
         self.polisher.configure(self.cfg.text.polish, &self.cfg.text.polish_model, self.cfg.model.unload_after_mins);
         if self.cfg.audio.keep_warm {
             self.audio.set_warm(self.cfg.audio.device.clone(), true);
@@ -443,6 +484,8 @@ impl Controller {
                 self.hotkey_access_check_at(),
                 self.secure_input_check_at(),
                 self.split_check_at(),
+                self.capture_until,
+                self.recording_since.map(|t| t + MAX_RECORDING),
             ]
                 .into_iter()
                 .flatten()
@@ -464,16 +507,19 @@ impl Controller {
                         self.on_hotkey(ev);
                     }
                 }
-                recv(self.engine_rx) -> ev => {
-                    if let Ok(ev) = ev {
-                        self.on_engine(ev);
+                recv(self.audio_rx) -> problem => {
+                    if let Ok(problem) = problem {
+                        self.on_microphone_problem(problem);
                     }
                 }
-                recv(self.polish_rx) -> ev => {
-                    if let Ok(ev) = ev {
-                        self.on_polish(ev);
-                    }
-                }
+                recv(self.engine_rx) -> ev => match ev {
+                    Ok(ev) => self.on_engine(ev),
+                    Err(_) => self.engine_gone(),
+                },
+                recv(self.polish_rx) -> ev => match ev {
+                    Ok(ev) => self.on_polish(ev),
+                    Err(_) => self.polisher_gone(),
+                },
                 recv(self.internal_rx) -> ev => {
                     if let Ok(ev) = ev {
                         self.on_internal(ev);
@@ -503,7 +549,78 @@ impl Controller {
             if self.secure_input_check_at().is_some_and(|t| now >= t) {
                 self.check_secure_input(now);
             }
+            if self.capture_until.is_some_and(|t| now >= t) {
+                self.end_capture();
+                self.emit(Event::CaptureEnded);
+            }
+            if self.recording_since.is_some_and(|t| now >= t + MAX_RECORDING) && matches!(self.phase, Phase::Recording { .. }) {
+                log::info!("the recording reached {} minutes: finishing it", MAX_RECORDING.as_secs() / 60);
+                self.finish_recording();
+                self.notice(NoticeKind::Info, format!("Stopped after {} minutes", MAX_RECORDING.as_secs() / 60));
+            }
         }
+    }
+
+    /// Stops recording a shortcut.
+    fn end_capture(&mut self) {
+        self.capturing = false;
+        self.capture_until = None;
+        self.hotkeys.set_capture(false);
+    }
+
+    /// The microphone couldn't be opened, for a recording or the test.
+    fn on_microphone_problem(&mut self, problem: String) {
+        self.mic_testing = false;
+        if matches!(self.phase, Phase::Recording { .. }) {
+            self.cancel_recording(false);
+        }
+        self.notice(NoticeKind::Error, format!("Couldn't open the microphone: {problem}"));
+    }
+
+    /// The speech engine's thread is gone (it panicked), and nothing more
+    /// will come from it. Stop listening, or the closed channel would keep
+    /// this loop spinning, and let go of what waited on it.
+    fn engine_gone(&mut self) {
+        self.engine_rx = crossbeam_channel::never();
+        for (id, p) in std::mem::take(&mut self.pending) {
+            if p.prepared {
+                self.polisher.forget(id);
+            }
+        }
+        self.parts.clear();
+        self.part_of.clear();
+        self.notice(NoticeKind::Error, "The speech engine stopped. Restart Bars");
+        self.settle_phase();
+    }
+
+    /// The polish thread is gone: dictations go in as heard from here on,
+    /// those it was holding included.
+    fn polisher_gone(&mut self) {
+        self.polish_rx = crossbeam_channel::never();
+        self.polish_status = PolishStatus::Failed("it stopped; restart Bars".into());
+        self.emit(Event::Polish(self.polish_status.clone()));
+        log::error!("the polish thread stopped: dictations go in as heard");
+        if let Some(r) = self.recording.as_mut() {
+            r.prepared = false;
+        }
+        for parts in self.parts.values_mut() {
+            parts.polished = false;
+        }
+        let mut heard: Vec<u64> = Vec::new();
+        for (id, p) in self.pending.iter_mut() {
+            p.prepared = false;
+            if p.transcript.is_some() {
+                heard.push(*id);
+            }
+        }
+        heard.sort_unstable();
+        for id in heard {
+            let Some(p) = self.pending.remove(&id) else { continue };
+            if let Some(t) = p.transcript {
+                self.deliver(t, p.audio_secs, None, Field::Reading(p.focus));
+            }
+        }
+        self.settle_phase();
     }
 
     /// macOS: when to next ask whether another app holds secure input.
@@ -525,13 +642,12 @@ impl Controller {
             self.secure_input = owner.clone();
             self.secure_input_since = now;
             self.emit(Event::SecureInput(owner));
-        } else if let Some(app) = &owner {
-            if now.saturating_duration_since(self.secure_input_since) >= SECURE_INPUT_NOTICE
+        } else if let Some(app) = &owner
+            && now.saturating_duration_since(self.secure_input_since) >= SECURE_INPUT_NOTICE
                 && self.secure_input_told.insert(app.clone())
             {
                 self.notice(NoticeKind::Warning, format!("Shortcut paused: {app} has secure input on"));
             }
-        }
     }
 
     /// macOS: when to next check whether shortcut access has been granted,
@@ -581,9 +697,12 @@ impl Controller {
             // (macOS), so reopen the live microphone test.
             if mic(&p.items) != mic(&self.last_requirements) && self.mic_testing && self.phase == Phase::Idle {
                 let device = self.cfg.audio.device.clone();
-                self.audio.cancel();
+                self.audio.meter(None, false);
                 self.audio.set_warm(device.clone(), false);
-                self.audio.start(device, self.cfg.audio.keep_warm);
+                self.audio.meter(device.clone(), true);
+                if self.cfg.audio.keep_warm {
+                    self.audio.set_warm(device, true);
+                }
             }
             // Something was granted (or revoked): restart what depends on it.
             self.refresh_permissions();
@@ -613,6 +732,7 @@ impl Controller {
     fn on_hotkey(&mut self, ev: HotkeyEvent) {
         if let HotkeyEvent::Captured(chord) = ev {
             self.capturing = false;
+            self.capture_until = None;
             self.emit(Event::Captured(chord));
             return;
         }
@@ -716,7 +836,7 @@ impl Controller {
         }
         self.recognizer.reset();
         self.start_cue_at = None;
-        self.recording_since = None;
+        let lasted = self.recording_since.take().map_or(Duration::ZERO, |t| t.elapsed());
         self.unmute_others();
         let Stopped { recording: rec, stuck } = self.audio.stop();
         if stuck {
@@ -729,6 +849,11 @@ impl Controller {
         log::info!("recorded {secs:.2}s (peak {:.3}, loudest rms {loudness:.4})", rec.peak);
         if secs < 0.25 {
             self.drop_recording();
+            // A tap leaves nothing to transcribe; a shortcut held for a
+            // while should have.
+            if !stuck && lasted >= SILENT_MIC_AFTER {
+                self.notice(NoticeKind::Warning, "The microphone sent no audio. Check it's connected");
+            }
             self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
             return;
         }
@@ -1001,7 +1126,7 @@ impl Controller {
     /// The end of a dictation: clean-up, insertion and history. `polished`
     /// is the polish model's version of what was heard, if any.
     fn deliver(&mut self, t: Transcript, audio_secs: f32, polished: Option<String>, field: Field) {
-        let cleaned = self.text.process(polished.as_deref().unwrap_or(&t.text));
+        let cleaned = self.text.process(polished.as_deref().unwrap_or(&t.text), self.is_english(&t.text));
         if cleaned.is_empty() {
             self.notice(NoticeKind::Info, "No speech recognized");
             self.settle_phase();
@@ -1086,6 +1211,7 @@ impl Controller {
             Command::SetConfig(cfg) => self.apply_config(*cfg),
             Command::CaptureHotkey(on) => {
                 self.capturing = on;
+                self.capture_until = on.then(|| Instant::now() + CAPTURE_FOR);
                 self.hotkeys.set_capture(on);
                 if on && !self.hotkeys.is_active() {
                     #[cfg(target_os = "macos")]
@@ -1096,15 +1222,14 @@ impl Controller {
                 }
             }
             Command::ConfigureShortcut => self.hotkeys.configure(),
+            // Levels only: nothing is recorded, however long the test runs.
             Command::MicTest(on) => {
                 if on && self.phase == Phase::Idle {
-                    self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
+                    self.audio.meter(self.cfg.audio.device.clone(), true);
                     self.mic_testing = true;
                 } else if !on && self.mic_testing {
                     self.mic_testing = false;
-                    if self.phase == Phase::Idle {
-                        self.audio.cancel();
-                    }
+                    self.audio.meter(None, false);
                 }
             }
             Command::OpenUrl(url) => {
@@ -1185,13 +1310,15 @@ impl Controller {
                     return;
                 }
                 if let Some(old) = self.history.update(id, &text) {
-                    let request = self.entry_requests.iter().find(|(e, _)| *e == id).map(|(_, r)| *r);
+                    let request = self.entry_requests.iter().rev().find(|(e, _)| *e == id).map(|(_, r)| *r);
                     self.learn_from(request, &old, &text);
                 }
                 self.emit_history();
             }
             Command::DeleteEntry(id) => {
                 self.history.delete(id);
+                // The id can be given out again: forget which dictation it was.
+                self.entry_requests.retain(|(e, _)| *e != id);
                 self.emit_history();
             }
             Command::UndoLearned { from, to } => {
@@ -1213,13 +1340,44 @@ impl Controller {
             }
             Command::ClearHistory => {
                 self.history.clear();
+                self.entry_requests.clear();
                 self.emit_history();
             }
             Command::Shutdown => {}
         }
     }
 
+    /// Desktop shortcuts stand in for keyboard access that wasn't given
+    /// (the setup assistant offers them). Once Bars can read the keyboard
+    /// after all, it does, as the settings say it will: shortcuts of bare
+    /// modifiers work, and the setting goes back to picking the best way.
+    /// Linux only; nothing changes while the keyboard can't be read.
+    fn leave_desktop_shortcuts(&mut self) {
+        use crate::config::HotkeyBackendKind as Kind;
+        if !cfg!(target_os = "linux") || self.cfg.hotkey.backend != Kind::Portal {
+            return;
+        }
+        let direct = Hotkeys::start(Kind::Direct, self.cfg.hotkey.chords.clone(), self.hotkey_tx.clone());
+        if !direct.is_active() {
+            return;
+        }
+        log::info!("the keyboard can be read: shortcuts no longer go through the desktop");
+        self.hotkeys = direct;
+        self.sync_hotkeys_recording();
+        self.bound_trigger = None;
+        self.cfg.hotkey.backend = Kind::Auto;
+        if let Err(e) = self.cfg.save(&paths::config_file()) {
+            self.notice(NoticeKind::Error, format!("Couldn't save settings: {e:#}"));
+        }
+        self.emit(Event::Config(Box::new(self.cfg.clone())));
+    }
+
     fn refresh_permissions(&mut self) {
+        // The desktop has no shortcuts to offer (no portal for them): read
+        // the keyboard instead, if that's possible now.
+        if !self.hotkeys.is_active() {
+            self.leave_desktop_shortcuts();
+        }
         // Prefer direct access once it's granted (it supports more chords).
         let want_direct = self.hotkeys.backend_name() != "direct"
             && matches!(self.cfg.hotkey.backend, crate::config::HotkeyBackendKind::Auto | crate::config::HotkeyBackendKind::Direct);
@@ -1271,15 +1429,15 @@ impl Controller {
                 self.pieces = None;
                 self.emit(Event::LearningAvailable(false));
             }
-            self.engine.select(&cfg.model.id, cfg.model.threads, cfg.model.unload_after_mins);
+            self.engine.select(&cfg.model.id, cfg.model.unload_after_mins);
+        }
+        if cfg.audio.keep_warm != old.audio.keep_warm || cfg.audio.device != old.audio.device {
+            self.audio.set_warm(cfg.audio.device.clone(), cfg.audio.keep_warm);
         }
         if cfg.audio.device != old.audio.device && self.mic_testing && self.phase == Phase::Idle {
             // The microphone test (setup assistant) is listening: move it to
             // the newly picked device right away.
-            self.audio.cancel();
-            self.audio.start(cfg.audio.device.clone(), cfg.audio.keep_warm);
-        } else if cfg.audio.keep_warm != old.audio.keep_warm || cfg.audio.device != old.audio.device {
-            self.audio.set_warm(cfg.audio.device.clone(), cfg.audio.keep_warm);
+            self.audio.meter(cfg.audio.device.clone(), true);
         }
         if cfg.text != old.text {
             self.text = TextProcessor::new(&cfg.text);
@@ -1344,7 +1502,7 @@ impl Controller {
                 self.downloading = None;
                 if error.is_none() && id == self.cfg.model.id {
                     let m = &self.cfg.model;
-                    self.engine.select(&m.id, m.threads, m.unload_after_mins);
+                    self.engine.select(&m.id, m.unload_after_mins);
                 }
                 if error.is_none() && id == models::polish_model(&self.cfg.text.polish_model).id {
                     self.polisher.recheck();
@@ -1355,6 +1513,8 @@ impl Controller {
                 }
             }
             Internal::PermissionsFixed(Ok(())) => {
+                // Access was just given here: use it.
+                self.leave_desktop_shortcuts();
                 self.refresh_permissions();
                 // Elsewhere the OS prompts are still open; polling notices
                 // when the user answers.
@@ -1508,44 +1668,56 @@ fn spawn_inserter(
         .spawn(move || {
             let mut injector = Injector::new();
             for job in rx {
-                match job {
-                    InsertJob::Text { text, cfg, names, field, watch } => {
-                        let wants = cfg.smart_spacing || cfg.split_for_agents;
-                        let focus = match field {
-                            Field::Now => wants
-                                .then(|| focus::capture(cfg.smart_spacing.then_some(focus::CONTEXT_CHARS), FOCUS_TIMEOUT)),
-                            Field::Reading(rx) => rx.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok()),
-                            Field::Read(focus) => focus,
-                        };
-                        let focus = focus.unwrap_or_default();
-                        let inserted =
-                            insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, &focus);
-                        if let (Some(request), Some(inserted), true) = (watch, inserted, focus.field.is_some()) {
-                            let generation = watch_generation.load(Ordering::Relaxed);
-                            let watch = Watch {
-                                request,
-                                tracker: Tracker::new(&inserted),
-                                inserted,
-                                pid: focus.pid,
+                // A panic while inserting mustn't end the thread: every later
+                // dictation would go nowhere, without a word.
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match job {
+                        InsertJob::Text { text, cfg, names, field, watch } => {
+                            let wants = cfg.smart_spacing || cfg.split_for_agents;
+                            let focus = match field {
+                                Field::Now => wants
+                                    .then(|| focus::capture(cfg.smart_spacing.then_some(focus::CONTEXT_CHARS), FOCUS_TIMEOUT)),
+                                Field::Reading(rx) => rx.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok()),
+                                Field::Read(focus) => focus,
                             };
-                            let (internal, gen_now) = (internal.clone(), watch_generation.clone());
-                            thread::spawn(move || watch.run(generation, &gen_now, &internal));
+                            let focus = focus.unwrap_or_default();
+                            let inserted =
+                                insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, &focus);
+                            if let (Some(request), Some(inserted), true) = (watch, inserted, focus.field.is_some()) {
+                                let generation = watch_generation.load(Ordering::Relaxed);
+                                let watch = Watch {
+                                    request,
+                                    tracker: Tracker::new(&inserted),
+                                    inserted,
+                                    pid: focus.pid,
+                                };
+                                let (internal, gen_now) = (internal.clone(), watch_generation.clone());
+                                thread::spawn(move || watch.run(generation, &gen_now, &internal));
+                            }
+                        }
+                        InsertJob::RememberTarget => injector.remember_target(),
+                        InsertJob::Copy(text) => {
+                            if let Err(e) = injector.copy(&text) {
+                                let _ = ui.try_send(Event::Notice {
+                                    kind: NoticeKind::Error,
+                                    text: format!("Couldn't copy: {e:#}"),
+                                });
+                            } else {
+                                let _ = ui.try_send(Event::Notice {
+                                    kind: NoticeKind::Info,
+                                    text: "Copied".into(),
+                                });
+                            }
                         }
                     }
-                    InsertJob::RememberTarget => injector.remember_target(),
-                    InsertJob::Copy(text) => {
-                        if let Err(e) = injector.copy(&text) {
-                            let _ = ui.try_send(Event::Notice {
-                                kind: NoticeKind::Error,
-                                text: format!("Couldn't copy: {e:#}"),
-                            });
-                        } else {
-                            let _ = ui.try_send(Event::Notice {
-                                kind: NoticeKind::Info,
-                                text: "Copied".into(),
-                            });
-                        }
-                    }
+                }));
+                if run.is_err() {
+                    log::error!("inserting text crashed");
+                    injector = Injector::new();
+                    let _ = ui.try_send(Event::Notice {
+                        kind: NoticeKind::Error,
+                        text: "Inserting failed. Try Paste last transcript from the tray".into(),
+                    });
                 }
             }
         })

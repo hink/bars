@@ -215,6 +215,12 @@ pub struct LinuxInjector {
     clipboard: bool,
 }
 
+impl Default for LinuxInjector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinuxInjector {
     pub fn new() -> Self {
         let keyboard = match VirtualKeyboard::new() {

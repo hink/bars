@@ -81,10 +81,10 @@ pub fn paste_pieces<C: LazyClipboard>(
         thread::sleep(RESTORE_AFTER_READ);
         Ok(())
     })();
-    if let Some(saved) = saved {
-        if clip.still_ours() {
-            clip.restore(saved);
-        }
+    if let Some(saved) = saved
+        && clip.still_ours()
+    {
+        clip.restore(saved);
     }
     result.map(|()| outcome)
 }
@@ -137,7 +137,10 @@ mod tests {
         let pieces = vec!["a".to_string(), "b".to_string()];
         let mut lost = false;
         let mut clip = FakeRef(&fake);
-        let out = paste_pieces(&mut clip, &pieces, true, || Ok(fake.borrow_mut().press()), &mut || lost = true);
+        let out = paste_pieces(&mut clip, &pieces, true, || {
+            fake.borrow_mut().press();
+            Ok(())
+        }, &mut || lost = true);
         assert_eq!(out.unwrap(), Pasted::Landed);
         assert!(!lost);
         assert_eq!(fake.borrow().offered, pieces);

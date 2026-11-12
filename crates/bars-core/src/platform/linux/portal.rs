@@ -190,8 +190,12 @@ impl PortalHotkeys {
 
 // ---------------------------------------------------------------------------
 
+/// Key symbols to send (and whether each is pressed or released), and
+/// where to say how it went.
+type Keystrokes = (Vec<(u32, bool)>, crossbeam_channel::Sender<anyhow::Result<()>>);
+
 pub struct PortalKeyboard {
-    tx: async_channel::Sender<(Vec<(u32, bool)>, crossbeam_channel::Sender<anyhow::Result<()>>)>,
+    tx: async_channel::Sender<Keystrokes>,
 }
 
 fn token_file() -> std::path::PathBuf {
@@ -201,7 +205,7 @@ fn token_file() -> std::path::PathBuf {
 impl PortalKeyboard {
     /// Starts (lazily, on first use) a RemoteDesktop session for the keyboard.
     pub fn new() -> Self {
-        let (tx, rx) = async_channel::unbounded::<(Vec<(u32, bool)>, crossbeam_channel::Sender<anyhow::Result<()>>)>();
+        let (tx, rx) = async_channel::unbounded::<Keystrokes>();
         thread::Builder::new()
             .name("bars-portal-kbd".into())
             .spawn(move || {

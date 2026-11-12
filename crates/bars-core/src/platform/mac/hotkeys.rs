@@ -12,6 +12,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use core_foundation::base::TCFType;
 use core_foundation::mach_port::CFMachPortRef;
@@ -209,10 +210,21 @@ impl Tap {
         if matches!(etype, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
             log::info!("keyboard event tap was disabled by macOS ({etype:?}); re-enabling");
             let mut st = self.state.lock();
-            // Keys may have changed while we weren't listening.
-            st.held.clear();
-            st.tracker = ChordTracker::default();
-            st.filter.reset();
+            // Keys may have been let go while the tap wasn't listening.
+            // Those the keyboard says are up are forgotten, and the tracker
+            // is told: a shortcut that was held ends, and the dictation
+            // with it, rather than recording on with no release to come.
+            // Keys still down stay held; their releases arrive as usual.
+            let released = st.held.drop_stale(Duration::ZERO, key_is_down);
+            let TapState { held, filter, .. } = &mut *st;
+            filter.keep_only(&held.keys);
+            if !released.is_empty() {
+                let (chords, capturing) = {
+                    let sh = self.shared.lock();
+                    (sh.chords.clone(), sh.capturing)
+                };
+                self.track(&mut st, None, &chords, capturing);
+            }
             let p = self.port.load(Ordering::Acquire);
             if p != 0 {
                 unsafe { CGEventTapEnable(p as CFMachPortRef, true) };

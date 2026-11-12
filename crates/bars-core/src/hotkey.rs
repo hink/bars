@@ -275,10 +275,10 @@ pub fn canonical_key_name(name: &str) -> String {
     if lower.len() == 1 {
         return lower.to_ascii_uppercase();
     }
-    if let Some(n) = lower.strip_prefix('f') {
-        if n.parse::<u8>().is_ok() {
-            return format!("F{n}");
-        }
+    if let Some(n) = lower.strip_prefix('f')
+        && n.parse::<u8>().is_ok()
+    {
+        return format!("F{n}");
     }
     let mut chars = lower.chars();
     match chars.next() {
@@ -426,12 +426,8 @@ impl ChordTracker {
                     .iter()
                     .filter_map(|k| map.modifier_of(*k))
                     .fold(Mods::empty(), |a, m| a | m);
-                let key = keys
-                    .iter()
-                    .rev()
-                    .find(|k| map.modifier_of(**k).is_none())
-                    .and_then(|k| map.name_of(*k))
-                    .map(Key);
+                let pressed = keys.iter().rev().find(|k| map.modifier_of(**k).is_none());
+                let key = pressed.and_then(|k| map.name_of(*k)).map(Key);
                 // A modifier on its own is recorded with its side.
                 let sided = match keys.as_slice() {
                     [k] => map.name_of(*k).map(Key).filter(|k| k.modifier().is_some()),
@@ -439,6 +435,10 @@ impl ChordTracker {
                 };
                 let chord = match sided {
                     Some(k) => Chord { mods: Mods::empty(), key: Some(k) },
+                    // A key with no name here (a numpad or media key, say)
+                    // can't be a shortcut. Nothing is recorded, rather
+                    // than the modifiers held with it on their own.
+                    None if pressed.is_some() && key.is_none() => Chord { mods: Mods::empty(), key: None },
                     None => Chord { mods: cmods, key },
                 };
                 out.events.push(HotkeyEvent::Captured(chord));
@@ -579,6 +579,12 @@ impl KeyFilter {
     /// Forget dropped presses (after the backend lost track of keys).
     pub fn reset(&mut self) {
         self.dropped.clear();
+    }
+
+    /// Forget the dropped presses of keys that aren't in `held` any more:
+    /// their releases went by unseen.
+    pub fn keep_only(&mut self, held: &HashSet<u32>) {
+        self.dropped.retain(|code| held.contains(code));
     }
 }
 
@@ -1136,6 +1142,20 @@ mod tests {
         feed(&mut t, &mut k, 2, false, &chord, true);
         let ev = feed(&mut t, &mut k, 3, false, &chord, true);
         assert_eq!(ev, vec![HotkeyEvent::Captured("Shift+Super+Space".parse().unwrap())]);
+    }
+
+    #[test]
+    fn a_key_without_a_name_records_nothing() {
+        let chord: Chord = "Ctrl+Space".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        // Ctrl with a key the map has no name for (50).
+        feed(&mut t, &mut k, 1, true, &chord, true);
+        feed(&mut t, &mut k, 50, true, &chord, true);
+        feed(&mut t, &mut k, 50, false, &chord, true);
+        let ev = feed(&mut t, &mut k, 1, false, &chord, true);
+        // Not Ctrl on its own, which would be a valid shortcut.
+        let [HotkeyEvent::Captured(captured)] = ev.as_slice() else { panic!("{ev:?}") };
+        assert!(captured.parts().is_empty() && captured.is_valid().is_err(), "{captured:?}");
     }
 
     #[test]

@@ -540,7 +540,7 @@ impl Worker {
                 }
                 Cmd::Prepare { id, focus } => {
                     let focus = focus.recv_timeout(FOCUS_TIMEOUT).ok();
-                    self.read_ahead(id, focus.as_ref());
+                    self.guarded(|w| w.read_ahead(id, focus.as_ref()));
                     self.fields.push_back((id, focus));
                     // Fields of dictations that never came (none expected).
                     while self.fields.len() > 8 {
@@ -569,7 +569,11 @@ impl Worker {
                     };
                     let mut done = so_far.unwrap_or_default();
                     let last = job.part != Part::Next;
-                    let polished = job.polish.then(|| self.polish(&job.text, focus.as_ref(), &done.text, last)).flatten();
+                    let polished = job
+                        .polish
+                        .then(|| self.guarded(|w| w.polish(&job.text, focus.as_ref(), &done.text, last)))
+                        .flatten()
+                        .flatten();
                     if job.polish {
                         self.last_used = Instant::now();
                     }
@@ -600,6 +604,24 @@ impl Worker {
                     };
                     let _ = self.events.send(PolishEvent::Done { request: job.request, polished, focus });
                 }
+            }
+        }
+    }
+
+    /// Runs a step that calls into the model. A panic there mustn't take
+    /// the thread with it (every dictation passes through here while
+    /// polish is on): the model is dropped and polish reports failure, so
+    /// dictations go in as heard.
+    fn guarded<T>(&mut self, step: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(self))) {
+            Ok(done) => Some(done),
+            Err(_) => {
+                log::error!("the polish model crashed; polish is off until it's turned on again");
+                self.model = None;
+                self.read_ahead_for = None;
+                self.failed = true;
+                self.status(PolishStatus::Failed("the polish model crashed".into()));
+                None
             }
         }
     }

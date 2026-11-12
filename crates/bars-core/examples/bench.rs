@@ -21,13 +21,13 @@ fn main() -> anyhow::Result<()> {
             print!("downloading {} ... ", info.id);
             let mut last = 0;
             models::download(info, Arc::new(AtomicBool::new(false)), &mut |d, t| {
-                let pct = if t > 0 { d * 100 / t } else { 0 };
+                let pct = (d * 100).checked_div(t).unwrap_or(0);
                 if pct >= last + 10 { last = pct; print!("{pct}% "); use std::io::Write; let _ = std::io::stdout().flush(); }
             })?;
             println!("done");
         }
         let t0 = Instant::now();
-        let mut model = bars_core::engine::load(info, &info.dir(), None)?;
+        let mut model = bars_core::engine::load(info, &info.dir())?;
         let load = t0.elapsed();
         let _ = model.transcribe(&vec![0.0; 16000], &TranscribeOptions::default());
         let mut best = f32::MAX;

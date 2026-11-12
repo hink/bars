@@ -51,7 +51,7 @@ pub enum EngineEvent {
 }
 
 enum Cmd {
-    Select { id: String, threads: Option<usize>, idle_unload: Option<Duration> },
+    Select { id: String, idle_unload: Option<Duration> },
     /// `keep`: only the words heard there (a piece of a longer recording
     /// and the audio around it).
     Transcribe { request: u64, samples: Vec<f32>, rate: u32, keep: Option<Range<usize>>, language: Option<String> },
@@ -74,12 +74,11 @@ impl Engine {
     }
 
     /// Choose (and eagerly load) a model.
-    pub fn select(&self, id: &str, threads: Option<usize>, unload_after_mins: u32) {
+    pub fn select(&self, id: &str, unload_after_mins: u32) {
         let idle_unload = (unload_after_mins > 0)
             .then(|| Duration::from_secs(unload_after_mins as u64 * 60));
         let _ = self.tx.send(Cmd::Select {
             id: id.to_string(),
-            threads,
             idle_unload,
         });
     }
@@ -115,6 +114,8 @@ impl Engine {
 }
 
 /// Parakeet is kept by type: learning reads its confidences.
+// One model is loaded at a time: its size here costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Model {
     Parakeet(ParakeetModel),
     Other(Box<dyn SpeechModel + Send>),
@@ -158,7 +159,6 @@ struct Loaded {
 struct Worker {
     events: Sender<EngineEvent>,
     selected: Option<String>,
-    threads: Option<usize>,
     idle_unload: Option<Duration>,
     loaded: Option<Loaded>,
     last_used: Instant,
@@ -169,7 +169,6 @@ impl Worker {
         Worker {
             events,
             selected: None,
-            threads: None,
             idle_unload: None,
             loaded: None,
             last_used: Instant::now(),
@@ -185,27 +184,26 @@ impl Worker {
             let cmd = match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(c) => c,
                 Err(RecvTimeoutError::Timeout) => {
-                    if let (Some(limit), Some(l)) = (self.idle_unload, &self.loaded) {
-                        if self.last_used.elapsed() > limit {
-                            let id = l.id.clone();
-                            self.loaded = None;
-                            log::info!("unloaded idle model {id}");
-                            self.status(EngineStatus::Unloaded(id));
-                        }
+                    if let (Some(limit), Some(l)) = (self.idle_unload, &self.loaded)
+                        && self.last_used.elapsed() > limit
+                    {
+                        let id = l.id.clone();
+                        self.loaded = None;
+                        log::info!("unloaded idle model {id}");
+                        self.status(EngineStatus::Unloaded(id));
                     }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             };
             match cmd {
-                Cmd::Select { id, threads, idle_unload } => {
-                    let changed = self.selected.as_deref() != Some(&id) || self.threads != threads;
+                Cmd::Select { id, idle_unload } => {
+                    let changed = self.selected.as_deref() != Some(&id);
                     self.selected = Some(id);
-                    self.threads = threads;
                     self.idle_unload = idle_unload;
                     if changed || self.loaded.is_none() {
                         self.loaded = None;
-                        let _ = self.ensure_loaded();
+                        let _ = self.guarded(|w| w.ensure_loaded());
                     }
                 }
                 Cmd::Transcribe { request, samples, rate, keep, language } => {
@@ -218,7 +216,7 @@ impl Worker {
                     });
                     let audio_secs = secs(keep.map_or(samples.len(), |k| k.len()));
                     let samples = crate::audio::resample(&samples, rate, crate::audio::SAMPLE_RATE);
-                    let result = self.ensure_loaded().and_then(|()| self.run_piece(&samples, span, language));
+                    let result = self.guarded(|w| w.ensure_loaded().and_then(|()| w.run_piece(&samples, span, language)));
                     self.last_used = Instant::now();
                     match result {
                         Ok((text, heard, infer_ms)) => {
@@ -245,6 +243,20 @@ impl Worker {
                         self.status(EngineStatus::Unloaded(l.id));
                     }
                 }
+            }
+        }
+    }
+
+    /// Runs a step that calls into the model. A panic there mustn't take
+    /// the thread, and every later dictation, with it: the step fails, and
+    /// the model is loaded afresh the next time it's needed.
+    fn guarded<T>(&mut self, step: impl FnOnce(&mut Self) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(self))) {
+            Ok(result) => result,
+            Err(_) => {
+                log::error!("the speech engine crashed; its model will be loaded again");
+                self.loaded = None;
+                Err(anyhow!("the speech engine crashed"))
             }
         }
     }
@@ -393,13 +405,13 @@ fn join_tokens(text: &str) -> String {
 fn load_model(info: &ModelInfo, dir: &Path) -> anyhow::Result<Model> {
     Ok(match info.family {
         Family::Parakeet => Model::Parakeet(ParakeetModel::load(dir, &Quantization::Int8).map_err(|e| anyhow!("{e}"))?),
-        _ => Model::Other(load(info, dir, None)?),
+        _ => Model::Other(load(info, dir)?),
     })
 }
 
 /// Loads a model by family. ONNX Runtime picks its intra-op thread count
 /// (physical cores) itself.
-pub fn load(info: &ModelInfo, dir: &Path, _threads: Option<usize>) -> anyhow::Result<Box<dyn SpeechModel + Send>> {
+pub fn load(info: &ModelInfo, dir: &Path) -> anyhow::Result<Box<dyn SpeechModel + Send>> {
     let q = Quantization::Int8;
     let model: Box<dyn SpeechModel + Send> = match info.family {
         Family::Parakeet => Box::new(ParakeetModel::load(dir, &q).map_err(|e| anyhow!("{e}"))?),
@@ -443,7 +455,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn parakeet_hears_a_repeated_word_as_often_as_it_was_said() {
         let info = models::find("parakeet-ultra").unwrap();
-        let mut model = load(info, &info.dir(), None).expect("model downloaded");
+        let mut model = load(info, &info.dir()).expect("model downloaded");
         let wav = std::env::temp_dir().join(format!("bars-repeat-{}.wav", std::process::id()));
         for (said, times) in [("test test test", 3), ("test test test test test", 5)] {
             let ok = std::process::Command::new("say")

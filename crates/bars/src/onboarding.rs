@@ -92,6 +92,17 @@ impl Onboarding {
                 crate::theme::follow_system(window, cx);
             }),
         ];
+        // The window can be closed on any step: the microphone test ends
+        // with it, as does a shortcut being recorded.
+        cx.on_release(|this, cx| {
+            this.state.update(cx, |s, cx| {
+                s.send(Command::MicTest(false));
+                if s.capturing {
+                    s.stop_capture(cx);
+                }
+            });
+        })
+        .detach();
         // Permissions are often granted in system settings, outside Bars:
         // re-check while a step is waiting on one.
         cx.spawn(async move |this, cx| {

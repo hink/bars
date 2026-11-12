@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::hotkey::{Activation, Chord};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
@@ -24,22 +24,6 @@ pub struct Config {
     /// Recommended models (speech or polish) already suggested to people
     /// using another one: each is suggested once.
     pub models_offered: Vec<String>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            hotkey: HotkeyConfig::default(),
-            audio: AudioConfig::default(),
-            model: ModelConfig::default(),
-            insertion: InsertionConfig::default(),
-            text: TextConfig::default(),
-            ui: UiConfig::default(),
-            onboarded: false,
-            polish_offered: false,
-            models_offered: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -154,8 +138,6 @@ pub struct ModelConfig {
     pub id: String,
     /// BCP-47 language hint; `None` = auto-detect where supported.
     pub language: Option<String>,
-    /// Inference threads; `None` lets ONNX Runtime decide (physical cores).
-    pub threads: Option<usize>,
     /// Free the model from memory after this many idle minutes (0 = never).
     pub unload_after_mins: u32,
 }
@@ -165,7 +147,6 @@ impl Default for ModelConfig {
         ModelConfig {
             id: crate::models::DEFAULT_MODEL.to_string(),
             language: None,
-            threads: None,
             unload_after_mins: 0,
         }
     }

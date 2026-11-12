@@ -69,6 +69,20 @@ pub struct Overlay {
     _subs: Vec<Subscription>,
 }
 
+/// The most a notice shows of itself in the pill.
+const NOTICE_CHARS: usize = 64;
+
+/// A notice as the pill shows it: whole when short, else its beginning
+/// (what went wrong comes first; the settings window and the log have the
+/// rest).
+fn glanceable(text: &SharedString) -> SharedString {
+    if text.chars().count() <= NOTICE_CHARS {
+        return text.clone();
+    }
+    let start: String = text.chars().take(NOTICE_CHARS - 1).collect();
+    format!("{}…", start.trim_end()).into()
+}
+
 impl Overlay {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let level = state.read(cx).level.clone();
@@ -81,11 +95,8 @@ impl Overlay {
                 }
                 StateEvent::Notice => {
                     if let Some(n) = state.read(cx).notice.clone() {
-                        // Only surface short, glanceable notices here.
-                        if n.text.len() <= 64 {
-                            this.show_message(n.text, n.kind, MESSAGE_FOR, None);
-                            cx.notify();
-                        }
+                        this.show_message(glanceable(&n.text), n.kind, MESSAGE_FOR, None);
+                        cx.notify();
                     }
                 }
                 StateEvent::PasteFailed => {
@@ -130,10 +141,10 @@ impl Overlay {
             _subs: subs,
         };
         // A notice may be what caused this overlay to open.
-        if let Some(n) = state.read(cx).notice.clone() {
-            if n.at.elapsed() < Duration::from_millis(500) && n.text.len() <= 64 {
-                this.message = Some((n.text, n.kind, n.at));
-            }
+        if let Some(n) = state.read(cx).notice.clone()
+            && n.at.elapsed() < Duration::from_millis(500)
+        {
+            this.message = Some((glanceable(&n.text), n.kind, n.at));
         }
         this.sync(state.read(cx).phase);
         this

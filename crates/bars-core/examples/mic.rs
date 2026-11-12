@@ -13,7 +13,7 @@ fn main() {
     }
     let updates = Arc::new(AtomicU32::new(0));
     let u = updates.clone();
-    let audio = bars_core::audio::Audio::spawn(Arc::new(move |_l| { u.fetch_add(1, Ordering::Relaxed); }));
+    let audio = bars_core::audio::Audio::spawn(Arc::new(move |_l| { u.fetch_add(1, Ordering::Relaxed); }), Arc::new(|e| eprintln!("microphone: {e}")));
     let t = std::time::Instant::now();
     audio.start(None, false);
     std::thread::sleep(Duration::from_secs_f32(secs));

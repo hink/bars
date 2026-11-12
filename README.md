@@ -17,7 +17,7 @@ Muesli 0.8B on llama.cpp.
 | --- | --- |
 | **Hold** `Ctrl` + `Super` | Talk; release to insert the text |
 | **Double-tap** `Ctrl` + `Super` | Hands-free: keep talking, tap again to insert |
-| `Esc` while recording | Cancel (the app doesn't also get the `Esc`) |
+| `Esc` while recording | Cancel (the app doesn't also get the `Esc`, except on Linux while the shortcut is held: see below) |
 | Tray menu → *Paste last transcript* | Re-insert the last dictation |
 | `bars --toggle` | Start/stop from any custom key binding or script |
 
@@ -30,8 +30,15 @@ like F9 or Pause (any key that doesn't type or edit text), or a mouse button:
 the middle button or a side button, on its own or with modifiers (never left
 or right click). On macOS and Windows the key or button then does nothing
 else; on Linux it also reaches the app, so pick one the app doesn't use. Say **"new line"** or **"new paragraph"** to break lines; filler words
-("um", "uh") are removed; the Dictionary page holds word replacements and
-spoken snippets.
+("um", "uh") are removed from English dictations; the Dictionary page holds
+word replacements and spoken snippets. A recording ends by itself after 30
+minutes, and what was said until then is inserted.
+
+On Linux, Bars only takes keys away from apps during hands-free dictation.
+While you hold the shortcut, `Esc` cancels the dictation and also reaches
+the desktop, together with the keys you're holding: with the default
+shortcut that is `Ctrl` + `Super` + `Esc`, which KDE uses for Kill Window.
+If you cancel that way, change one of the two shortcuts.
 
 *Mute other audio* (off by default, under Microphone) silences music, videos
 and other apps while you dictate, and turns them back on when you stop.
@@ -99,7 +106,8 @@ All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
 | Model | Download | Languages | Ryzen 9950X3D | 2 cores |
 | --- | --- | --- | --- | --- |
 | **Parakeet Ultra** (default) | 668 MB | 25 European, auto-detect | ≈ v3 | ≈ v3 |
-| Parakeet TDT 0.6B v3 | 671 MB | 25 European, auto-detect | 245 ms | 513 ms || Parakeet TDT 0.6B v2 | 661 MB | English | ≈ v3 | ≈ v3 |
+| Parakeet TDT 0.6B v3 | 671 MB | 25 European, auto-detect | 245 ms | 513 ms |
+| Parakeet TDT 0.6B v2 | 661 MB | English | ≈ v3 | ≈ v3 |
 | Canary 180M Flash | 213 MB | en, de, es, fr | 275 ms | 582 ms |
 
 Models download from Hugging Face on first run into

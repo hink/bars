@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = crossbeam_channel::unbounded();
     let engine = Engine::spawn(tx);
-    engine.select(info.id, None, 0);
+    engine.select(info.id, 0);
     let next = || -> anyhow::Result<Transcript> {
         loop {
             match rx.recv_timeout(Duration::from_secs(300))? {

@@ -177,6 +177,9 @@ fn plan_reads(mimes: &[String]) -> Vec<(String, Vec<String>)> {
 
 // ---- The clipboard thread ---------------------------------------------------
 
+/// A selection's pipes, each with the types it's served as.
+type SavedPipes = Vec<(Vec<String>, OwnedFd)>;
+
 enum Request {
     Offer {
         regular: Option<Contents>,
@@ -189,7 +192,7 @@ enum Request {
     /// types it's served as. None when the selection is empty.
     Save {
         primary: bool,
-        reply: Sender<Option<Vec<(Vec<String>, OwnedFd)>>>,
+        reply: Sender<Option<SavedPipes>>,
     },
     StillOurs(Sender<bool>),
 }
@@ -361,10 +364,10 @@ impl State {
 
     fn on_send(&mut self, source: &Source, mime: String, fd: OwnedFd) {
         let Some(s) = self.served.iter().find(|s| &s.source == source) else { return };
-        if let Some((tx, watch)) = &s.reads {
-            if watch.contains(&mime) {
-                let _ = tx.send(());
-            }
+        if let Some((tx, watch)) = &s.reads
+            && watch.contains(&mime)
+        {
+            let _ = tx.send(());
         }
         let Some(data) = s.contents.iter().find(|(m, _)| *m == mime).map(|(_, d)| d.clone()) else { return };
         // A slow reader mustn't hold up the clipboard thread.
@@ -470,7 +473,7 @@ fn handle(req: Request, state: &mut State, manager: &Manager, device: &Device, q
     match req {
         Request::Offer { regular, primary, watch, reply } => {
             let (tx, rx) = unbounded();
-            let reads = (!watch.is_empty()).then(|| (tx, watch));
+            let reads = (!watch.is_empty()).then_some((tx, watch));
             let selections = [(regular, false), (primary.filter(|_| manager.has_primary()), true)];
             for (contents, is_primary) in selections {
                 let Some(contents) = contents else { continue };

@@ -93,10 +93,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for KeymapState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
-            if interface == "wl_seat" {
-                registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ());
-            }
+        if let wl_registry::Event::Global { name, interface, version } = event
+            && interface == "wl_seat"
+        {
+            registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ());
         }
     }
 }
@@ -110,10 +110,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for KeymapState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = event {
-            if caps.contains(wl_seat::Capability::Keyboard) {
-                seat.get_keyboard(qh, ());
-            }
+        if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = event
+            && caps.contains(wl_seat::Capability::Keyboard)
+        {
+            seat.get_keyboard(qh, ());
         }
     }
 }

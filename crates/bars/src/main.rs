@@ -129,6 +129,13 @@ fn main() {
         logger.target(env_logger::Target::Pipe(Box::new(Tee(file))));
     }
     logger.init();
+    // A panic on a worker thread is otherwise only printed, which an app
+    // started from a launcher never shows: it goes to the log as well.
+    let print_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("{info}");
+        print_panic(info);
+    }));
     // Still before any other thread exists (the logger starts none).
     bars_core::audio::prepare_environment();
 
@@ -192,7 +199,9 @@ fn main() {
     }
 
     let config = Config::load_or_default(&paths::config_file());
-    let (ui_tx, ui_rx) = async_channel::bounded(1024);
+    // Unbounded: the controller's state changes are never dropped (it skips
+    // microphone levels itself while the UI is behind).
+    let (ui_tx, ui_rx) = async_channel::unbounded();
     let handle = controller::spawn(config.clone(), ui_tx);
 
     let reopen_tx = shell_tx.clone();

@@ -161,10 +161,26 @@ fn can_reinstall(info: &str, home: &Path) -> bool {
         && info.lines().any(|l| l.trim() == "org.freedesktop.Flatpak=talk")
 }
 
+/// Windows: the installer `install` downloaded, until `run_installer`.
+#[cfg(target_os = "windows")]
+static INSTALLER: std::sync::Mutex<Option<(cargo_packager_updater::Update, Vec<u8>)>> = std::sync::Mutex::new(None);
+
+/// Windows: runs the installer `install` downloaded. It closes Bars and
+/// starts the new version, and this process ends in here: call it once
+/// nothing is being dictated. It returns only when it failed.
+#[cfg(target_os = "windows")]
+pub fn run_installer() -> anyhow::Result<()> {
+    let waiting = INSTALLER.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let (update, installer) = waiting.ok_or_else(|| anyhow!("no update was downloaded"))?;
+    update.install(installer)?;
+    Ok(())
+}
+
 /// Downloads, verifies and installs the latest release, and returns the
-/// version installed. Windows: the installer takes over and this process
-/// exits. macOS: the app is replaced on disk; restart into it with
-/// `relaunch_after_exit`.
+/// version installed. macOS: the app is replaced on disk; restart into it
+/// with `relaunch_after_exit`. Windows: the installer is only downloaded
+/// and checked here, since running it ends this process; `run_installer`
+/// does that.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn install() -> anyhow::Result<String> {
     use cargo_packager_updater::{Config, WindowsConfig, WindowsUpdateInstallMode};
@@ -182,8 +198,15 @@ pub fn install() -> anyhow::Result<String> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     let update = cargo_packager_updater::check_update(current, config)?.ok_or_else(|| anyhow!("no newer version"))?;
     log::info!("installing Bars {}", update.version);
+    #[cfg(target_os = "macos")]
     update.download_and_install()?;
-    Ok(update.version)
+    let version = update.version.clone();
+    #[cfg(target_os = "windows")]
+    {
+        let installer = update.download()?;
+        *INSTALLER.lock().unwrap_or_else(|e| e.into_inner()) = Some((update, installer));
+    }
+    Ok(version)
 }
 
 /// Linux: installs the latest release from the file this build updates
@@ -344,8 +367,22 @@ fn check_version(cmd: &mut std::process::Command, version: &str) -> anyhow::Resu
 /// Runs `cmd` to the end, or stops it after `limit`.
 #[cfg(target_os = "linux")]
 fn run(cmd: &mut std::process::Command, limit: Duration) -> anyhow::Result<std::process::Output> {
+    use nix::sys::signal::{Signal, kill};
     use std::process::Stdio;
-    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A program written a moment ago (the update's own binary) can be
+    // "busy" for an instant more: another thread starting a process just
+    // then holds the file open until its own program takes over.
+    let mut tries = 0;
+    let child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            spawned => break spawned?,
+        }
+    };
     let pid = nix::unistd::Pid::from_raw(child.id() as i32);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -354,7 +391,11 @@ fn run(cmd: &mut std::process::Command, limit: Duration) -> anyhow::Result<std::
     match rx.recv_timeout(limit) {
         Ok(out) => Ok(out?),
         Err(_) => {
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+            let _ = kill(pid, Signal::SIGTERM);
+            // One that doesn't listen is killed, rather than left behind.
+            if rx.recv_timeout(Duration::from_secs(3)).is_err() {
+                let _ = kill(pid, Signal::SIGKILL);
+            }
             Err(anyhow!("{:?} didn't finish in {} s", cmd.get_program(), limit.as_secs()))
         }
     }

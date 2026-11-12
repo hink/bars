@@ -40,10 +40,10 @@ pub fn sync(enabled: bool) {
             "[Desktop Entry]\nType=Application\nName=Bars\nComment=Voice dictation\nExec=\"{exe}\" --background\nIcon=xyz.hink.Bars\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n"
         );
         let _ = std::fs::create_dir_all(&dir);
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(entry.as_str()) {
-            if let Err(e) = std::fs::write(&path, entry) {
-                log::warn!("autostart: {e}");
-            }
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(entry.as_str())
+            && let Err(e) = std::fs::write(&path, entry)
+        {
+            log::warn!("autostart: {e}");
         }
     } else {
         let _ = std::fs::remove_file(path);
@@ -63,7 +63,7 @@ async fn request_portal(enabled: bool) -> anyhow::Result<()> {
     Background::request()
         .reason("Start Bars at login so dictation is always one shortcut away")
         .auto_start(enabled)
-        .command(&["bars", "--background"])
+        .command(["bars", "--background"])
         .dbus_activatable(false)
         .send()
         .await?

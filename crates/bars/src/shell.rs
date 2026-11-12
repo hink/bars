@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::*;
 use bars_core::config::OverlayMode;
-use bars_core::controller::{Command, Phase};
+use bars_core::controller::{Command, NoticeKind, Phase};
 use bars_core::models;
 use bars_core::update::Release;
 
@@ -42,6 +42,7 @@ pub enum Launch {
 const SETUP_NOTIFICATION: &str = "bars-setup";
 const UPDATE_NOTIFICATION: &str = "bars-update";
 const POLISH_NOTIFICATION: &str = "bars-polish";
+const NOTICE_NOTIFICATION: &str = "bars-notice";
 /// How long after starting to look for a newer Bars (when allowed), and how
 /// often to see whether it's time to look again (every 24 hours by the
 /// clock, which keeps going while the computer sleeps; timers don't).
@@ -160,12 +161,22 @@ impl Shell {
                 }
             }
             StateEvent::Notice => {
-                let settings_focused = self.settings_window_active(cx);
-                if overlay_enabled && !settings_focused {
+                if self.settings_window_active(cx) {
+                    // The settings window shows it.
+                } else if overlay_enabled {
                     self.show_overlay(cx);
                     if self.state.read(cx).phase == Phase::Idle {
                         self.schedule_overlay_close(Duration::from_millis(3200), cx);
                     }
+                } else if let Some(n) = self.state.read(cx).notice.clone().filter(|n| n.kind != NoticeKind::Info) {
+                    // The pill is turned off, but a problem still has to
+                    // reach the user.
+                    cx.show_system_notification(SystemNotification {
+                        tag: NOTICE_NOTIFICATION.into(),
+                        title: "Bars".into(),
+                        body: n.text,
+                        actions: Vec::new(),
+                    });
                 }
             }
             // Stay up longer: they offer to copy the text, or to undo.
@@ -185,13 +196,12 @@ impl Shell {
                 }
             }
             // Windows: the installer takes over. macOS: the old app keeps
-            // running from a bundle that's been replaced, so it restarts
-            // right away. Linux keeps running the old binary until asked.
-            StateEvent::UpdateInstalled if cfg!(target_os = "windows") => {
-                self.on_command(ShellCommand::Quit, cx);
-                return;
+            // running from a bundle that's been replaced, so it restarts.
+            // Both wait for a dictation under way to finish. Linux keeps
+            // running the old binary until asked.
+            StateEvent::UpdateInstalled if cfg!(any(target_os = "windows", target_os = "macos")) => {
+                self.restart_when_idle(Duration::ZERO, cx)
             }
-            StateEvent::UpdateInstalled if cfg!(target_os = "macos") => self.restart_when_idle(Duration::ZERO, cx),
             StateEvent::UpdateInstalled => self.ask_to_restart(cx),
             StateEvent::RestartToUpdate => self.restart_when_idle(Duration::ZERO, cx),
             StateEvent::Restart => self.restart_when_idle(Duration::from_secs(3), cx),
@@ -225,6 +235,15 @@ impl Shell {
                 }
             }
             let _ = this.update(cx, |this, cx| {
+                // Windows: the installer closes Bars and starts the new
+                // version. This process ends inside the call.
+                #[cfg(target_os = "windows")]
+                if let Err(e) = bars_core::update::run_installer() {
+                    log::error!("could not run the installer: {e:#}");
+                    this.restarting = false;
+                    this.state.update(cx, |s, cx| s.installer_failed(cx));
+                    return;
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if let Err(e) = bars_core::update::relaunch_after_exit() {
                     log::error!("could not restart Bars: {e:#}");
@@ -402,10 +421,10 @@ impl Shell {
 
     pub fn show_onboarding(&mut self, cx: &mut Context<Self>) {
         bring_to_front(cx);
-        if let Some(h) = self.onboarding {
-            if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-                return;
-            }
+        if let Some(h) = self.onboarding
+            && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+        {
+            return;
         }
         let step = self.first_unfinished_step(cx);
         match onboarding::open(self.state.clone(), step, cx) {
@@ -516,10 +535,10 @@ impl Shell {
             let alive = h
                 .update(cx, |root, window, cx| {
                     window.activate_window();
-                    if let Some(page) = page {
-                        if let Ok(view) = root.view().clone().downcast::<settings::SettingsView>() {
-                            view.update(cx, |v, cx| v.go(page, cx));
-                        }
+                    if let Some(page) = page
+                        && let Ok(view) = root.view().clone().downcast::<settings::SettingsView>()
+                    {
+                        view.update(cx, |v, cx| v.go(page, cx));
                     }
                 })
                 .is_ok();

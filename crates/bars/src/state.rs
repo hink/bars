@@ -79,8 +79,9 @@ pub enum StateEvent {
     UpdateFound,
     /// A check the user asked for found nothing, or installing failed.
     UpdateResult,
-    /// The update is in place: Windows' installer takes over from here,
-    /// macOS restarts into it, and Linux asks whether to restart now.
+    /// The update is in place (Windows: downloaded): Windows' installer
+    /// takes over and macOS restarts into it, both once nothing is being
+    /// dictated; Linux asks whether to restart now.
     UpdateInstalled,
     /// The user chose to restart into the installed update (once no
     /// dictation is under way).
@@ -324,6 +325,18 @@ impl AppState {
         .detach();
     }
 
+    /// Windows: the downloaded installer couldn't be run. The update is on
+    /// offer again, to try again.
+    #[cfg(target_os = "windows")]
+    pub fn installer_failed(&mut self, cx: &mut Context<Self>) {
+        if let UpdateStatus::Installed(release) = &self.update {
+            let why = format!("Couldn't install ver. {}.", release.version);
+            self.update = UpdateStatus::InstallFailed(release.clone(), why);
+            cx.emit(StateEvent::UpdateResult);
+            cx.notify();
+        }
+    }
+
     pub fn send(&self, cmd: Command) {
         self.controller.send(cmd);
     }
@@ -451,13 +464,18 @@ impl AppState {
                         self.switching.remove(&offer);
                     }
                 }
-                if let Some(e) = error {
-                    if !e.contains("cancelled") {
-                        self.download_errors.insert(id, e);
-                    }
+                if let Some(e) = error
+                    && !e.contains("cancelled")
+                {
+                    self.download_errors.insert(id, e);
                 }
             }
             Event::Captured(chord) => self.on_captured(chord, cx),
+            // Nothing was pressed in time.
+            Event::CaptureEnded => {
+                self.capturing = false;
+                self.capture_slot = None;
+            }
             Event::Transcript(text) => {
                 self.last_transcript = Some(text);
                 self.transcripts += 1;

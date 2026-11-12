@@ -12,11 +12,11 @@ use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::{TITLE_BAR_HEIGHT, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use bars_core::controller::{Command, Phase};
+use bars_core::controller::{Command, NoticeKind, Phase};
 use bars_core::engine::EngineStatus;
 use bars_core::models;
 
-use crate::state::{AppState, Offer, UpdateStatus};
+use crate::state::{AppState, Offer, StateEvent, UpdateStatus};
 use crate::theme::{FONT, PaletteExt};
 use crate::widgets::{ButtonKind, button, fmt_bytes, h_row, icon, icon_button, progress_bar, v_col};
 
@@ -89,6 +89,9 @@ pub struct SettingsView {
     _subs: Vec<Subscription>,
 }
 
+/// How long a notice from the controller stays up in this window.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// A card above Setup in the sidebar. Only one shows at a time, the first
 /// waiting in this order; arrows on it page through the others, and
 /// answering one brings up the next.
@@ -112,7 +115,21 @@ impl SettingsView {
             cx.observe_window_appearance(window, |this, window, cx| {
                 this.sync_theme(window, cx);
             }),
+            // A notice shows here for a while (see `render_notice`): draw
+            // again once its time is up.
+            cx.subscribe(&state, |_, _, ev: &StateEvent, cx| {
+                if let StateEvent::Notice = ev {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(NOTICE_FOR + std::time::Duration::from_millis(50)).await;
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                }
+            }),
         ];
+        // A shortcut being recorded when the window closes would otherwise
+        // be taken from the next keys pressed anywhere.
+        cx.on_release(|this, cx| this.end_capture(cx)).detach();
         SettingsView {
             dict_from: mk("What you say, e.g. “example dot x y z”", window, cx),
             dict_to: mk("What to write, e.g. example.xyz", window, cx),
@@ -133,7 +150,49 @@ impl SettingsView {
         crate::theme::follow_system(window, cx);
     }
 
+    /// Stops recording a shortcut, if one is being recorded.
+    fn end_capture(&mut self, cx: &mut App) {
+        self.state.update(cx, |s, cx| {
+            if s.capturing {
+                s.stop_capture(cx);
+            }
+        });
+    }
+
+    /// What the controller last had to say, for a while after it said it:
+    /// the pill doesn't show while this window has focus, and can't fit a
+    /// long message anyway.
+    fn render_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let p = cx.palette();
+        let notice = self.state.read(cx).notice.clone().filter(|n| n.at.elapsed() < NOTICE_FOR)?;
+        let tint = match notice.kind {
+            NoticeKind::Error => p.danger,
+            NoticeKind::Warning => p.warning,
+            NoticeKind::Info => p.accent,
+        };
+        Some(
+            div().absolute().bottom(px(20.)).left_0().w_full().px(px(40.)).flex().justify_center().child(
+                h_row()
+                    .max_w(px(560.))
+                    .gap(px(10.))
+                    .items_start()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .rounded(px(10.))
+                    .bg(p.surface_2)
+                    .border_1()
+                    .border_color(p.border_strong)
+                    .shadow_md()
+                    .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(tint))
+                    .child(div().min_w_0().text_size(px(13.)).text_color(p.text).child(notice.text)),
+            ),
+        )
+    }
+
     pub fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == Page::General && page != Page::General {
+            self.end_capture(cx);
+        }
         self.page = page;
         if page == Page::General {
             self.state.update(cx, |s, cx| s.refresh_devices(cx));
@@ -345,7 +404,7 @@ impl SettingsView {
             ),
         };
         let detail = match progress {
-            Some((done, total)) => format!("Downloading… {}%", if total > 0 { done * 100 / total } else { 0 }),
+            Some((done, total)) => format!("Downloading… {}%", (done * 100).checked_div(total).unwrap_or(0)),
             None if failed => "The download failed.".to_string(),
             None if switching => "Waiting to download…".to_string(),
             None if st.installed.contains(m.id) => format!("{better}, and it's already downloaded."),
@@ -454,7 +513,7 @@ impl Render for SettingsView {
                     .child(self.render_sidebar(cx))
                     .child(
                         // The page scrolls below the title bar's strip.
-                        div().flex_1().min_w_0().h_full().pt(TITLE_BAR_HEIGHT).child(
+                        div().flex_1().min_w_0().h_full().relative().pt(TITLE_BAR_HEIGHT).children(self.render_notice(cx)).child(
                             div()
                                 .id("page-scroll")
                                 .size_full()

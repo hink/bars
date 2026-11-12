@@ -306,9 +306,16 @@ pub fn judge(edit: &Edit, confidence: Option<f32>, pieces: &Pieces, known: &[Rep
     if from.chars().chain(to.chars()).any(|c| c.is_ascii_digit()) {
         return Verdict::Ignore("numbers");
     }
+    // A rule for an everyday word would fire everywhere ("there" → "their",
+    // "will" → "Will"). Rules match whatever the capitals, so the word
+    // counts as it reads in lowercase: "Your" at the start of a sentence is
+    // as common as "your".
+    let common = !from.contains(' ') && pieces.is_common(&from_lc);
     if from_lc == to_lc {
         // Only capitalization: a name, if it's mid-sentence.
-        return if edit.mid_sentence && to.starts_with(char::is_uppercase) {
+        return if common {
+            Verdict::Ignore("common word")
+        } else if edit.mid_sentence && to.starts_with(char::is_uppercase) {
             Verdict::Suggest
         } else {
             Verdict::Ignore("capitalization")
@@ -317,8 +324,7 @@ pub fn judge(edit: &Edit, confidence: Option<f32>, pieces: &Pieces, known: &[Rep
     if grammar_only(&from_lc, &to_lc) {
         return Verdict::Ignore("grammar");
     }
-    // A rule for an everyday word would fire everywhere ("there" → "their").
-    if !from.contains(' ') && pieces.is_common(from) {
+    if common {
         return Verdict::Ignore("common word");
     }
     let similar = compact(&from_lc) == compact(&to_lc)
@@ -327,14 +333,24 @@ pub fn judge(edit: &Edit, confidence: Option<f32>, pieces: &Pieces, known: &[Rep
     if !similar {
         return Verdict::Ignore("reworded");
     }
-    // Names, jargon and words the model needs several pieces for.
+    // Names, jargon and words the model needs several pieces for. The
+    // capital a sentence starts with doesn't make a name.
+    let to = if edit.mid_sentence { to.to_string() } else { lowercase_first(to) };
     let rare = to.chars().any(char::is_uppercase)
-        || pieces.count(to) >= 3 * to.split_whitespace().count().max(1);
+        || pieces.count(&to) >= 3 * to.split_whitespace().count().max(1);
     let unsure = confidence.is_some_and(|c| c < UNSURE);
     match (unsure, rare) {
         (true, true) => Verdict::Learn,
         (true, false) | (false, true) => Verdict::Suggest,
         (false, false) => Verdict::Ignore("the model was sure"),
+    }
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -404,10 +420,10 @@ fn sound_key(s: &str) -> String {
             'h' => (None, 1),
             c => (Some(c), 1),
         };
-        if let Some(c) = code {
-            if !out.ends_with(c) {
-                out.push(c);
-            }
+        if let Some(c) = code
+            && !out.ends_with(c)
+        {
+            out.push(c);
         }
         i += skip;
     }
@@ -478,6 +494,23 @@ mod tests {
         assert_eq!(judge(&edit("cooper netties", "Kubernetes"), Some(0.3), &p, &known), Verdict::Ignore("already known"));
         let start = Edit { mid_sentence: false, ..edit("chris", "Chris") };
         assert_eq!(judge(&start, Some(0.3), &p, &[]), Verdict::Ignore("capitalization"));
+    }
+
+    #[test]
+    fn a_sentence_starts_capital_makes_no_rule() {
+        let p = pieces();
+        let start = |from: &str, to: &str| Edit { mid_sentence: false, ..edit(from, to) };
+        // An everyday word, whatever its capitals: the rule would rewrite
+        // every "there".
+        assert_eq!(judge(&start("There", "Their"), Some(0.3), &p, &[]), Verdict::Ignore("common word"));
+        assert_eq!(judge(&edit("There", "Their"), Some(0.3), &p, &[]), Verdict::Ignore("common word"));
+        // Capitalizing one is no name either.
+        assert_eq!(judge(&edit("good", "Good"), Some(0.9), &p, &[]), Verdict::Ignore("common word"));
+        // The fix isn't a rare word just for starting the sentence.
+        assert_eq!(judge(&start("Thier", "Their"), Some(0.9), &p, &[]), Verdict::Ignore("the model was sure"));
+        assert_eq!(judge(&start("Thier", "Their"), Some(0.3), &p, &[]), Verdict::Suggest);
+        // Mid-sentence, a capital still marks a name.
+        assert_eq!(judge(&edit("kris", "Chris"), Some(0.9), &p, &[]), Verdict::Suggest);
     }
 
     #[test]

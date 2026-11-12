@@ -8,10 +8,10 @@ use crate::config::{Replacement, Snippet, TextConfig};
 
 static FILLERS: Lazy<Regex> = Lazy::new(|| {
     // Leading comma/space handling keeps "So, um, I think" -> "So, I think".
-    Regex::new(r"(?i)(?:,\s*)?\b(?:u+h+m*|u+m+|e+r+m+|e+h+|a+h+|h+m+|m+h*m+)\b[,.]?").unwrap()
+    Regex::new(r"(?i)(?:,\s*)?\b(u+h+m*|u+m+|e+r+m+|e+h+|a+h+|h+m+|m+h*m+)\b[,.]?").unwrap()
 });
 static MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ \t]{2,}").unwrap());
-static SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([,.;:!?])").unwrap());
+static SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+[,.;:!?]").unwrap());
 static DOUBLE_COMMA: Lazy<Regex> = Lazy::new(|| Regex::new(r",\s*([,.;:!?])").unwrap());
 static NEW_PARAGRAPH: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*\bnew paragraph\b[,.]?\s*").unwrap());
@@ -22,6 +22,16 @@ pub struct TextProcessor {
     voice_commands: bool,
     replacements: Vec<(Regex, String)>,
     snippets: Vec<(Regex, String)>,
+}
+
+/// Private-use characters, which no speech model writes: one stands in for
+/// each snippet's expansion while the text around it is tidied, so the
+/// expansion goes in exactly as written.
+const STAND_INS: std::ops::RangeInclusive<char> = '\u{E000}'..='\u{F8FF}';
+
+fn stand_in(snippet: usize) -> Option<char> {
+    let c = char::from_u32(*STAND_INS.start() as u32 + u32::try_from(snippet).ok()?)?;
+    STAND_INS.contains(&c).then_some(c)
 }
 
 fn phrase_regex(phrase: &str) -> Option<Regex> {
@@ -50,7 +60,7 @@ impl TextProcessor {
                 .filter_map(|(from, to)| phrase_regex(from).map(|r| (r, to.to_string(), from.len())))
                 .collect();
             // Longest phrases first so "new york times" wins over "new york".
-            out.sort_by(|a, b| b.2.cmp(&a.2));
+            out.sort_by_key(|item| std::cmp::Reverse(item.2));
             out.into_iter().map(|(r, t, _)| (r, t)).collect()
         };
         TextProcessor {
@@ -71,14 +81,17 @@ impl TextProcessor {
         }
     }
 
-    pub fn process(&self, raw: &str) -> String {
-        let mut text = raw.trim().to_string();
+    /// `english`: the dictation is in English. The fillers removed are
+    /// English ones, and words in other languages ("um" in Portuguese and
+    /// German).
+    pub fn process(&self, raw: &str, english: bool) -> String {
+        let mut text = raw.trim().replace(|c: char| STAND_INS.contains(&c), "");
         if text.is_empty() {
             return text;
         }
 
-        if self.remove_fillers {
-            text = FILLERS.replace_all(&text, "").into_owned();
+        if self.remove_fillers && english {
+            text = remove_fillers(&text);
         }
 
         for (re, to) in &self.replacements {
@@ -87,12 +100,13 @@ impl TextProcessor {
 
         // Snippets: if the whole utterance is just the cue, emit the expansion
         // verbatim (no added punctuation); otherwise expand inline.
-        for (re, expansion) in &self.snippets {
+        for (i, (re, expansion)) in self.snippets.iter().enumerate() {
             let bare = text.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
             if re.find(bare).is_some_and(|m| m.start() == 0 && m.end() == bare.len()) {
                 return expansion.clone();
             }
-            text = re.replace_all(&text, regex::NoExpand(expansion)).into_owned();
+            let with = stand_in(i).map_or_else(|| expansion.clone(), String::from);
+            text = re.replace_all(&text, regex::NoExpand(&with)).into_owned();
         }
 
         if self.voice_commands {
@@ -104,8 +118,49 @@ impl TextProcessor {
         if self.voice_commands {
             text = capitalize_after_breaks(&text);
         }
+        if text.contains(|c: char| STAND_INS.contains(&c)) {
+            for (i, (_, expansion)) in self.snippets.iter().enumerate() {
+                if let Some(c) = stand_in(i) {
+                    text = text.replace(c, expansion);
+                }
+            }
+        }
         text
     }
+}
+
+/// Removes "um", "uh" and the like, except where the same letters are part
+/// of a word or a unit: joined by a hyphen ("uh-huh", "mm-hmm") or after a
+/// number ("5 mm"). A filler that started a sentence hands its capital to
+/// the word after it ("Um, the next" -> "The next").
+fn remove_fillers(text: &str) -> String {
+    fn push(out: &mut String, chunk: &str, capitalize: &mut bool) {
+        let start = chunk.len() - chunk.trim_start().len();
+        if *capitalize && start < chunk.len() {
+            out.push_str(&chunk[..start]);
+            out.push_str(&capitalize_first(&chunk[start..]));
+            *capitalize = false;
+        } else {
+            out.push_str(chunk);
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut capitalize = false;
+    for caps in FILLERS.captures_iter(text) {
+        let (Some(all), Some(word)) = (caps.get(0), caps.get(1)) else { continue };
+        let (before, after) = (&text[..word.start()], &text[word.end()..]);
+        let hyphenated = before.ends_with('-') || after.starts_with('-');
+        let after_number = before.trim_end().ends_with(|c: char| c.is_ascii_digit());
+        if hyphenated || after_number {
+            continue;
+        }
+        push(&mut out, &text[last..all.start()], &mut capitalize);
+        capitalize |= word.as_str().starts_with(char::is_uppercase);
+        last = all.end();
+    }
+    push(&mut out, &text[last..], &mut capitalize);
+    out
 }
 
 /// Replaces whole-word matches, except inside a contraction ("don" in
@@ -132,23 +187,46 @@ fn replace_words(re: &Regex, text: &str, to: &str) -> String {
 
 fn tidy(text: &str) -> String {
     let mut t = MULTI_SPACE.replace_all(text, " ").into_owned();
-    t = SPACE_BEFORE_PUNCT.replace_all(&t, "$1").into_owned();
+    t = close_up_punctuation(&t);
     t = DOUBLE_COMMA.replace_all(&t, "$1").into_owned();
-    let t = t
-        .lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Not `lines()`: a break that ends the text ("... New line.") stays.
+    let t = t.split('\n').map(str::trim).collect::<Vec<_>>().join("\n");
     let t = t.trim_matches(|c: char| c == ' ' || c == ',').to_string();
     capitalize_first(&t)
 }
 
+/// Drops the space before punctuation ("word ." -> "word."), but not before
+/// a word that starts with it (".env", ".NET").
+fn close_up_punctuation(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in SPACE_BEFORE_PUNCT.find_iter(text) {
+        if text[m.end()..].starts_with(char::is_alphanumeric) {
+            continue;
+        }
+        out.push_str(&text[last..m.start()]);
+        out.push_str(&text[m.end() - 1..m.end()]);
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Capitalizes the first letter, unless the first word is written its own
+/// way ("iPhone", "x86") or is an address or a file name.
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c.is_lowercase() => c.to_uppercase().collect::<String>() + chars.as_str(),
+        Some(c) if c.is_lowercase() && !keeps_its_case(s) => c.to_uppercase().collect::<String>() + chars.as_str(),
         _ => s.to_string(),
     }
+}
+
+fn keeps_its_case(s: &str) -> bool {
+    let word = s.split_whitespace().next().unwrap_or("").trim_end_matches([',', '.', ';', ':', '!', '?']);
+    word.chars().skip(1).any(|c| c.is_uppercase() || c.is_numeric())
+        || word.contains(['@', '_', '/', '\\'])
+        || word.split(['.', ':']).filter(|part| !part.is_empty()).count() > 1
 }
 
 fn capitalize_after_breaks(s: &str) -> String {
@@ -411,17 +489,17 @@ mod tests {
     #[test]
     fn removes_fillers() {
         let p = proc(TextConfig::default());
-        assert_eq!(p.process("Um, so I think, uh, we should go."), "So I think we should go.");
-        assert_eq!(p.process("uhh hmm okay"), "Okay");
+        assert_eq!(p.process("Um, so I think, uh, we should go.", true), "So I think we should go.");
+        assert_eq!(p.process("uhh hmm okay", true), "Okay");
         // Doesn't eat real words.
-        assert_eq!(p.process("The umbrella is here."), "The umbrella is here.");
+        assert_eq!(p.process("The umbrella is here.", true), "The umbrella is here.");
     }
 
     #[test]
     fn line_commands() {
         let p = proc(TextConfig::default());
         assert_eq!(
-            p.process("Dear team, new paragraph thanks for coming. New line Chris"),
+            p.process("Dear team, new paragraph thanks for coming. New line Chris", true),
             "Dear team,\n\nThanks for coming.\nChris"
         );
     }
@@ -444,11 +522,11 @@ mod tests {
             expansion: "me@example.xyz".into(),
         });
         let p = proc(cfg);
-        assert_eq!(p.process("I asked Chat, GPT about it."), "I asked ChatGPT about it.");
+        assert_eq!(p.process("I asked Chat, GPT about it.", true), "I asked ChatGPT about it.");
         // Not inside contractions.
-        assert_eq!(p.process("I don't know don."), "I don't know Don.");
-        assert_eq!(p.process("My email."), "me@example.xyz");
-        assert_eq!(p.process("Send it to my email please."), "Send it to me@example.xyz please.");
+        assert_eq!(p.process("I don't know don.", true), "I don't know Don.");
+        assert_eq!(p.process("My email.", true), "me@example.xyz");
+        assert_eq!(p.process("Send it to my email please.", true), "Send it to me@example.xyz please.");
     }
 
     fn field(before: &str, after: &str) -> Surroundings {
@@ -481,6 +559,49 @@ mod tests {
         assert_eq!(fit("call (", ")", "Maybe"), "maybe");
         // End of line without the trailing-space setting.
         assert_eq!(fit_to_field("Hi.", &field("", ""), false, &[]), "Hi.");
+    }
+
+    #[test]
+    fn fillers_only_in_english_and_not_inside_words() {
+        let p = proc(TextConfig::default());
+        // "um" is a word in Portuguese and German.
+        assert_eq!(p.process("Eu tenho um carro novo.", false), "Eu tenho um carro novo.");
+        assert_eq!(p.process("Ich komme um drei Uhr.", false), "Ich komme um drei Uhr.");
+        // Units and hyphenated words.
+        assert_eq!(p.process("The gap is 5 mm wide.", true), "The gap is 5 mm wide.");
+        assert_eq!(p.process("Uh-huh, that works.", true), "Uh-huh, that works.");
+        assert_eq!(p.process("Mm-hmm, I agree.", true), "Mm-hmm, I agree.");
+        // A filler that started a sentence hands its capital on.
+        assert_eq!(p.process("That's done. Um, the next thing is tests.", true), "That's done. The next thing is tests.");
+    }
+
+    #[test]
+    fn trailing_line_commands() {
+        let p = proc(TextConfig::default());
+        assert_eq!(p.process("That's the first item. New line.", true), "That's the first item.\n");
+        assert_eq!(p.process("End of section. New paragraph.", true), "End of section.\n\n");
+    }
+
+    #[test]
+    fn words_written_their_own_way() {
+        let mut cfg = TextConfig::default();
+        for (from, to) in [("dot env", ".env"), ("dot net", ".NET")] {
+            cfg.dictionary.push(Replacement { from: from.into(), to: to.into(), learned: false });
+        }
+        cfg.snippets.push(Snippet { trigger: "my email".into(), expansion: "me@example.xyz".into() });
+        cfg.snippets.push(Snippet { trigger: "my address".into(), expansion: "1 high street\n  springfield".into() });
+        let p = proc(cfg);
+        // A word that starts with a full stop keeps the space before it.
+        assert_eq!(p.process("Open the dot env file and the dot net project.", true), "Open the .env file and the .NET project.");
+        assert_eq!(p.process("Wait , what ?", true), "Wait, what?");
+        // The first word isn't capitalized when it has its own spelling.
+        assert_eq!(p.process("iPhone sales are up.", true), "iPhone sales are up.");
+        assert_eq!(p.process("x86 only.", true), "x86 only.");
+        assert_eq!(p.process("example.com is down.", true), "example.com is down.");
+        assert_eq!(p.process("sales are up.", true), "Sales are up.");
+        // Snippets go in as written, wherever they are.
+        assert_eq!(p.process("my email please", true), "me@example.xyz please");
+        assert_eq!(p.process("Send it to my address please.", true), "Send it to 1 high street\n  springfield please.");
     }
 
     #[test]
