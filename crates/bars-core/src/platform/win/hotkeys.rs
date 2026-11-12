@@ -36,6 +36,12 @@ use crate::hotkey::{
 /// what's wanted.
 const WM_SYNC_MOUSE: u32 = WM_APP + 1;
 
+/// Marks the input Bars sends itself (the paste keystroke, typed text, the
+/// key that keeps menus shut), which the hooks ignore. enigo tags its
+/// events with the same value. Other programs' injected input counts as
+/// the keyboard's: a remapped key or a macro can be a shortcut too.
+const OWN_INPUT: usize = enigo::EVENT_MARKER as usize;
+
 #[derive(Default)]
 struct Shared {
     chords: Vec<Chord>,
@@ -165,7 +171,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if code >= 0 {
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         // Ignore our own synthetic input (paste chords, typed text).
-        if (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
+        let own = (kb.flags.0 & LLKHF_INJECTED.0) != 0 && kb.dwExtraInfo == OWN_INPUT;
+        if !own {
             let msg = wparam.0 as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
@@ -189,7 +196,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 _ if (ms.mouseData >> 16) as u16 == XBUTTON1 => VK_XBUTTON1,
                 _ => VK_XBUTTON2,
             };
-            if (ms.flags & LLMHF_INJECTED) == 0 && on_key(vk, down) {
+            let own = (ms.flags & LLMHF_INJECTED) != 0 && ms.dwExtraInfo == OWN_INPUT;
+            if !own && on_key(vk, down) {
                 return LRESULT(1);
             }
         }
@@ -323,7 +331,7 @@ fn suppress_menus() {
                     wScan: 0,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: OWN_INPUT,
                 },
             },
         };

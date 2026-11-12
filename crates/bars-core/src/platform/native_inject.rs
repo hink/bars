@@ -125,8 +125,16 @@ impl NativeInjector {
         let press = super::mac::paste::press_paste;
         #[cfg(target_os = "windows")]
         let press = || {
+            // The V key by its virtual-key code, which is the same on every
+            // layout. Asked for as the letter "v", a layout without one
+            // (Russian, Greek, Hebrew...) has no key to press, and the
+            // letter would be typed instead of the paste.
+            const VK_V: u32 = 0x56;
             enigo.key(Key::Control, Direction::Press).map_err(key_err)?;
-            let tapped = enigo.key(Key::Unicode('v'), Direction::Click).map_err(key_err);
+            let tapped = enigo
+                .key(Key::Other(VK_V), Direction::Click)
+                .or_else(|_| enigo.key(Key::Unicode('v'), Direction::Click))
+                .map_err(key_err);
             enigo.key(Key::Control, Direction::Release).map_err(key_err)?;
             tapped
         };
