@@ -112,16 +112,28 @@ impl Backend for Sessions {
         self.seen.clear();
     }
 
-    fn recover(&mut self, muted: &[Muted]) {
-        let Ok(sessions) = self.sessions() else { return };
-        for s in sessions.into_iter().filter(|s| muted.iter().any(|m| m.id == s.app)) {
-            // SAFETY: as above.
-            unsafe {
-                if s.volume.GetMute().is_ok_and(|m| m.as_bool()) {
-                    let _ = s.volume.SetMute(false, std::ptr::null());
+    /// The mixer remembers an app's mute while the app isn't running, and
+    /// there's no session to unmute until it is: such an app is handed
+    /// back, to be tried again once it has started.
+    fn recover(&mut self, muted: &[Muted]) -> Vec<Muted> {
+        let Ok(sessions) = self.sessions() else { return muted.to_vec() };
+        let mut waiting = Vec::new();
+        for app in muted {
+            let mut running = false;
+            for s in sessions.iter().filter(|s| s.app == app.id) {
+                running = true;
+                // SAFETY: as above.
+                unsafe {
+                    if s.volume.GetMute().is_ok_and(|on| on.as_bool()) {
+                        let _ = s.volume.SetMute(false, std::ptr::null());
+                    }
                 }
             }
+            if !running {
+                waiting.push(app.clone());
+            }
         }
+        waiting
     }
 }
 

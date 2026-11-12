@@ -82,12 +82,13 @@ impl Backend for Streams {
         self.warned = false;
     }
 
-    fn recover(&mut self, muted: &[Muted]) {
+    fn recover(&mut self, muted: &[Muted]) -> Vec<Muted> {
         let streams = self.with_server(Server::streams).unwrap_or_default();
         for s in streams.into_iter().filter(|s| s.muted && muted.iter().any(|m| m.id == s.app)) {
             self.with_server(|server| server.set_mute(s.index, false));
         }
         self.server = None;
+        Vec::new()
     }
 }
 

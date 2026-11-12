@@ -114,7 +114,7 @@ impl Backend for Output {
         }
     }
 
-    fn recover(&mut self, muted: &[Muted]) {
+    fn recover(&mut self, muted: &[Muted]) -> Vec<Muted> {
         for m in muted {
             let Some(device) = device_for_uid(&m.id) else { continue };
             match m.volume {
@@ -133,6 +133,7 @@ impl Backend for Output {
                 }
             }
         }
+        Vec::new()
     }
 }
 
