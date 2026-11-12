@@ -19,13 +19,35 @@ on:
         options: [all, Linux, Windows, macOS]
         default: all
 
+# Actions are pinned to commits, not tags: a tag can be moved, and these
+# jobs hold the keys releases are signed with. Only the job that drafts the
+# release may write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A release isn't drafted from a commit whose tests fail.
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev cmake libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --workspace --locked
+
   flatpak:
     name: Linux (Flatpak, ${{ matrix.arch }})
     # x86_64 only for now. Arm64 builds on native runners worked (v0.2.0):
@@ -53,21 +75,21 @@ jobs:
           df -h /__w
           rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/codeql/*
           df -h /__w
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # This build reinstalls itself from the release's bundle when asked
       # (crates/bars-core/src/update.rs); local builds don't.
       - name: Mark the build as the release Flatpak
         run: |
           sed -i 's/^  env:$/  env:\n    BARS_PACKAGE: flatpak/' packaging/flatpak/xyz.hink.Bars.yml
           grep -q '^    BARS_PACKAGE: flatpak$' packaging/flatpak/xyz.hink.Bars.yml
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           manifest-path: packaging/flatpak/xyz.hink.Bars.yml
           arch: ${{ matrix.arch }}
           bundle: bars-${{ matrix.arch }}.flatpak
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
           upload-artifact: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-flatpak-${{ matrix.arch }}
           path: bars-${{ matrix.arch }}.flatpak
@@ -84,7 +106,7 @@ jobs:
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Linux'
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -92,8 +114,10 @@ jobs:
             pkg-config clang libclang-dev cmake libasound2-dev libfontconfig-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # This build replaces itself from the release's tarball when asked
       # (crates/bars-core/src/update.rs).
       - run: cargo build --release -p bars --locked
@@ -110,7 +134,7 @@ jobs:
           cp packaging/linux/70-bars.rules $dir/udev/
           cp README.md LICENSE THIRD_PARTY_NOTICES.txt $dir/
           tar czf $dir.tar.gz $dir
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-tarball-${{ matrix.arch }}
           path: bars-linux-${{ matrix.arch }}.tar.gz
@@ -127,9 +151,11 @@ jobs:
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Windows'
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
       - run: cargo packager --release -p bars --formats nsis
@@ -145,7 +171,7 @@ jobs:
           for f in dist/*-setup.exe; do
             cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "$BARS_UPDATER_KEY_PASSWORD" "$f"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-${{ matrix.arch }}
           path: |
@@ -162,9 +188,11 @@ jobs:
     env:
       CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: "ON"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
       # Developer ID: macOS keeps Bars' permissions through updates. Skipped
@@ -185,7 +213,7 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
           BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos
           path: |
@@ -195,19 +223,26 @@ jobs:
 
   release:
     name: Draft release
-    needs: [flatpak, linux-tarball, windows, macos]
+    needs: [test, flatpak, linux-tarball, windows, macos]
     if: startsWith(github.ref, 'refs/tags/v') || (inputs.version != '' && (inputs.only == '' || inputs.only == 'all'))
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      # Read by the steps below as a variable, never pasted into a script.
+      VERSION: ${{ inputs.version || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
       # The in-app updater checks Linux downloads against these signatures,
       # as macOS's and Windows' (signed in their jobs). Skipped without the
       # key (forks).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
       - name: Sign the Linux files for the updater
         env:
           BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
@@ -220,12 +255,12 @@ jobs:
           done
       # What the in-app updater reads: releases/latest/download/latest.json.
       # A draft is never "latest", so publishing the release offers it.
-      - run: python3 scripts/update-manifest.py "${{ inputs.version || github.ref_name }}" artifacts
-      - uses: softprops/action-gh-release@v2
+      - run: python3 scripts/update-manifest.py "$VERSION" artifacts
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ env.VERSION }}
           target_commitish: ${{ github.sha }}
-          name: Bars ${{ inputs.version || github.ref_name }}
+          name: Bars ${{ env.VERSION }}
           draft: true
           generate_release_notes: true
           files: artifacts/*

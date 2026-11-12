@@ -4,13 +4,21 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly too: a new advisory against a dependency shows up without a push.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
     inputs:
       platform:
-        description: "Windows/macOS build + smoke test to run"
+        description: "Windows/macOS: also run the app (smoke test) on"
         type: choice
         options: [all, Windows, macOS]
         default: all
+
+# Actions are pinned to commits, not tags (see release.yml: its builds can
+# start from caches these jobs write).
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -24,7 +32,7 @@ jobs:
     name: Linux (test)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -32,17 +40,44 @@ jobs:
             pkg-config clang libclang-dev cmake libasound2-dev libfontconfig-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # A dependency update can move past the version a [patch] in Cargo.toml
+      # replaces. Cargo then only warns, and the fix the patch carried is
+      # gone without a build error.
+      - name: Vendored patches are in use
+        run: |
+          if grep -q '^\[\[patch.unused\]\]' Cargo.lock; then
+            echo "::error file=Cargo.lock::A [patch] in Cargo.toml no longer applies (see [[patch.unused]] in Cargo.lock)"
+            exit 1
+          fi
       - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo build -p bars --locked
 
-  # Windows/macOS minutes are billed at 2x/10x on private repos, so these
-  # only run on demand: Actions > CI > Run workflow. Besides building, they
-  # run the app (scripts/smoke) and upload screenshots and logs.
+  # Known vulnerabilities in what Cargo.lock pins (RustSec advisories).
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: false
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  # Builds and runs the unit tests on every push. Run by hand (Actions > CI
+  # > Run workflow), it also runs the app (scripts/smoke) and uploads
+  # screenshots and logs.
   check:
-    name: ${{ matrix.name }} (build + smoke test)
-    if: github.event_name == 'workflow_dispatch'
+    name: ${{ matrix.name }} (build + test)
     strategy:
       fail-fast: false
       matrix:
@@ -57,18 +92,24 @@ jobs:
     env:
       CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: "ON"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the "stable" branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build -p bars --locked
+      # The unit tests of both crates (not the examples, which nothing
+      # here runs).
+      - run: cargo test --workspace --locked --lib --bins
       - name: Smoke test
+        if: github.event_name == 'workflow_dispatch'
         run: ${{ matrix.name == 'Windows' && 'pwsh scripts/smoke/windows.ps1' || 'bash scripts/smoke/macos.sh' }}
       - name: Disk image (macOS)
-        if: matrix.name == 'macOS'
+        if: github.event_name == 'workflow_dispatch' && matrix.name == 'macOS'
         run: |
           cargo install cargo-packager --locked --version 0.11.8
           bash scripts/smoke/macos-dmg.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: smoke-${{ matrix.name }}
